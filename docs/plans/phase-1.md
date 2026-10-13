@@ -62,10 +62,14 @@ Steps with no "after" (1.1, 1.2, 1.3, 1.11) start in parallel.
 
 Things nobody has tested against the real thing. Add to this list as steps land.
 
-- CI has not run in any Closeline repo: GitHub refused to start jobs for the organization on
-  2026-10-12 because of a billing or spending-limit problem.
-- Service repos need a `CLOSELINE_REPO_TOKEN` secret (read access to the private libraries) before
-  their CI can install dependencies.
-- Branch protection is not set on any Closeline repo.
 - `shared/` hooks are tested in the hub (`scripts/hooks.test.ts`), but the Stop gate has not been
   exercised by a real agent session in a service repo.
+- If a repo is made private again, its CI needs a `CLOSELINE_REPO_TOKEN` secret to install the
+  libraries, and GitHub Actions billing for the organization must be working. Neither has been
+  tested: on 2026-10-12 GitHub refused to start jobs while the repos were private.
+
+## Verified on 2026-10-12
+
+- All nine repos are public; `bun run verify` is green in CI in each.
+- A ruleset protects `main` and `develop` in each repo: pull request required, `verify / verify`
+  required, no deletion, no force-push.
