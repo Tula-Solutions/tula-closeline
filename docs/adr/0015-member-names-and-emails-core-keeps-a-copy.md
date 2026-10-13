@@ -27,5 +27,5 @@ The contract carries the fields on the member response and on both internal sign
 - Personal data is held in two schemas. Erasure and export must cover both.
 - The copy can be stale until a change reaches core. The delivery of a change must be idempotent and retried with a bounded, jittered retry, so a lost or repeated delivery cannot leave a wrong name behind for long.
 - Auth is the source: when the copy and auth disagree, auth is right, and the next change delivery corrects core.
-- `email` and `display_name` are added to `core.memberships` in a new migration in `tula-closeline-db`. The table is empty everywhere, so they can be `NOT NULL`.
+- The copy needs new columns on `core.memberships`, in a new migration in `tula-closeline-db`. Their names and whether they may be empty are left to that ticket; the table is empty everywhere, so no backfill is needed.
 - Work lands in this order: contract (payloads), db (columns), core, auth, portal. Role changes and removal work on user ids and do not wait for this.

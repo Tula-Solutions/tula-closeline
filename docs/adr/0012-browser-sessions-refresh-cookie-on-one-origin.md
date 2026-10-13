@@ -27,9 +27,9 @@ Subdomains of one site (for example `app.` and `api.`) are same-site but still c
 
 ## Consequences
 
-- A reload restores the session: the portal calls refresh on load, the cookie goes with it, and a new access token comes back into memory. Sign-out ends the session on every tab.
+- A reload restores the session: the portal calls refresh on load, the cookie goes with it, and a new access token comes back into memory. Sign-out clears the cookie, so no tab can refresh again; an access token already in another tab's memory lasts until it expires.
 - Infrastructure must provide one origin with path routing to each service (hub issue 19). The paths must match the cookie's `Path` and the dev server's proxy.
 - The cookie's name, the allowed origin and the exact session route paths are settings of the auth service, fixed by the implementing ticket.
 - Because refresh and sign-out are cookie-authenticated, a test with a foreign `Origin` must show both refused.
-- Auth also sets the known-device cookie that ADR 0014 needs, in the same session work.
+- The known-device cookie of ADR 0014 is a separate cookie, built with the lockout change (hub issue 30), not with this one.
 - The `ENVIRONMENT=local` exception must be gated on that value and tested, so it cannot be switched on elsewhere by a setting.
