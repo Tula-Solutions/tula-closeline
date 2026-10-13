@@ -35,3 +35,19 @@ jobs:
           fi
       - run: bun install --frozen-lockfile
       - run: bun run verify
+      # Optional, per repo: a `test:integration` script runs against real services. If the repo
+      # also commits a compose file, it is started first, so the script needs no environment
+      # beyond what that file sets up. A repo without the script skips this step.
+      - name: Integration tests
+        run: |
+          if ! jq -e '.scripts["test:integration"]' package.json > /dev/null; then
+            echo "No test:integration script; skipping."
+            exit 0
+          fi
+          for file in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
+            if [ -f "$file" ]; then
+              docker compose up -d --wait --wait-timeout 120
+              break
+            fi
+          done
+          bun run test:integration
