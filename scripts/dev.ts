@@ -1,7 +1,7 @@
 // Runs the Closeline stack on this machine: `bun run dev`. See docs/local-development.md.
 // This file only parses the arguments and wires the real effects into the flow in dev-flow.ts.
 import { dirname, join, resolve } from 'node:path'
-import { runDown, runUp } from './dev-flow.ts'
+import { type FlowContext, type FlowDeps, runDown, runUp } from './dev-flow.ts'
 import {
   buildStackEnv,
   busyPorts,
@@ -40,32 +40,45 @@ function fail(line: string): void {
   process.stderr.write(`[dev]      error: ${line}\n`)
 }
 
-/** The real effects of the flow. */
-const deps = {
-  run: runCommand,
-  capture: captureCommand,
-  spawn: spawnManaged,
-  supervise,
-  busy: busyPorts,
-  siblingProblems: (root: string) => checkSiblings(root),
-  buildEnv: buildStackEnv,
-  secrets: generateSecrets(),
-  salt: freshSalt,
-  subscribe: (onSignal: (signal: string) => void) => {
-    for (const signal of STOP_SIGNALS) {
-      process.on(signal, onSignal)
-    }
-    return () => {
+/** The real effects of the flow, with fresh secrets. Exported so a test can check the wiring. */
+export function createDeps(): FlowDeps {
+  return {
+    run: runCommand,
+    capture: captureCommand,
+    spawn: spawnManaged,
+    supervise,
+    busy: busyPorts,
+    siblingProblems: (root) => checkSiblings(root),
+    buildEnv: buildStackEnv,
+    secrets: generateSecrets(),
+    salt: freshSalt,
+    subscribe: (onSignal) => {
       for (const signal of STOP_SIGNALS) {
-        process.off(signal, onSignal)
+        process.on(signal, onSignal)
       }
-    }
-  },
-  probe: probeInternalWiring,
-  waitReady: (url: string, isAlive: () => boolean) =>
-    waitForReady(url, { timeoutMs: 90_000, isAlive }),
-  say,
-  fail,
+      return () => {
+        for (const signal of STOP_SIGNALS) {
+          process.off(signal, onSignal)
+        }
+      }
+    },
+    probe: probeInternalWiring,
+    waitReady: (url, isAlive) => waitForReady(url, { timeoutMs: 90_000, isAlive }),
+    say,
+    fail,
+  }
+}
+
+/** Where the flow runs: the hub, the clones, the ports, and the environment it was started with. */
+export function createContext(env: Record<string, string | undefined>, ports: Ports): FlowContext {
+  return {
+    hub,
+    composeFile: join(hub, 'compose.dev.yaml'),
+    root: env.CLOSELINE_SIBLINGS_DIR ? resolve(env.CLOSELINE_SIBLINGS_DIR) : dirname(hub),
+    ports,
+    parentEnv: env,
+    execPath: process.execPath,
+  }
 }
 
 if (import.meta.main) {
@@ -85,16 +98,8 @@ if (import.meta.main) {
     fail(error instanceof Error ? error.message : 'bad ports')
     process.exit(2)
   }
-  const context = {
-    hub,
-    composeFile: join(hub, 'compose.dev.yaml'),
-    root: process.env.CLOSELINE_SIBLINGS_DIR
-      ? resolve(process.env.CLOSELINE_SIBLINGS_DIR)
-      : dirname(hub),
-    ports,
-    parentEnv: process.env,
-    execPath: process.execPath,
-  }
+  const context = createContext(process.env, ports)
+  const deps = createDeps()
   process.exit(
     args.kind === 'down' ? await runDown(context, deps, args.volumes) : await runUp(context, deps)
   )

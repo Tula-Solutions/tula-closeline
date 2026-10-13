@@ -11,7 +11,8 @@
 # Needs Docker Compose 2.17.0 or newer (the release that added `up --wait-timeout`).
 #
 # Ports (override with the variables shown): Postgres 5440 (CLOSELINE_DEV_POSTGRES_PORT), the queue
-# 9324 (CLOSELINE_DEV_QUEUE_PORT), object storage 9090 (CLOSELINE_DEV_STORAGE_PORT). 5434 to 5437 belong to the repos' own test databases.
+# 9324 (CLOSELINE_DEV_QUEUE_PORT), object storage 9090 (CLOSELINE_DEV_STORAGE_PORT), the mailbox web
+# page and API 8026 (CLOSELINE_DEV_MAIL_PORT). 5434 to 5437 belong to the repos' own test databases.
 #
 # The queue and object storage are provisioned but nothing consumes them yet: the queue and
 # object storage ports in tula-closeline-kit (plan steps 1.10 and 1.12) are not built.
@@ -51,6 +52,10 @@ services:
     ports: ['127.0.0.1:${CLOSELINE_DEV_QUEUE_PORT:-9324}:9324']
     volumes:
       - ./scripts/dev/elasticmq.conf:/opt/elasticmq.conf:ro
+    # The image declares VOLUME /data. Without this compose makes an anonymous volume that
+    # `down --volumes` of this project cannot name. The queues are rebuilt on every start anyway.
+    tmpfs:
+      - /data
     healthcheck:
       test: ['CMD-SHELL', 'wget -q -O /dev/null "http://127.0.0.1:9324/?Action=ListQueues" || exit 1']
       interval: 3s
@@ -76,6 +81,23 @@ services:
       timeout: 3s
       retries: 20
       start_period: 10s
+
+  # Local mailbox (hub issue 38): auth and core hand their email to its send API, and a person or
+  # the smoke test reads it back. Only the HTTP port is published; its SMTP port (1025) is not,
+  # nothing here sends by SMTP. Messages live in memory, so there is no volume: they are gone
+  # when the container stops.
+  mail:
+    image: axllent/mailpit:v1.31.5@sha256:94f6b70c1436defae6799d9ac7ff0eeff9540465b842026d5cdb018f1c0234ea
+    # Mailpit checks for a newer release on start; this stack makes no outbound call.
+    environment:
+      MP_DISABLE_VERSION_CHECK: '1'
+    ports: ['127.0.0.1:${CLOSELINE_DEV_MAIL_PORT:-8026}:8025']
+    healthcheck:
+      test: ['CMD', '/mailpit', 'readyz']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
 
 volumes:
   postgres-data:
