@@ -18,7 +18,7 @@ The owner made these choices on 2026-10-13.
 4. **A Moment is a window of consecutive speaker turns,** with no model labelling.
 5. **Duplicate and changed Outcomes.** A CSV row whose deal id already exists with a won or lost Outcome is rejected as a duplicate. A Deal still open may be given its Outcome by a later CSV. An Owner or Admin can also set or correct any Deal's Outcome in the portal.
 6. **A Call for a Deal with no Outcome yet is accepted,** stored and indexed, and held back from search until its Deal is won. Lost and open Deals are kept.
-7. **The uploader says which speaker is the Rep,** at upload.
+7. **For a Transcript, the uploader says which speaker is the Rep,** at upload. Choice 9 covers Recordings.
 8. **Transcription stays as ADR 0010 chose it:** AssemblyAI Universal-3.5 Pro with speaker diarization, about $0.23 per audio hour, on the EU endpoint for the EU Region. The owner confirmed it after the report above, still pending a trial on real Calls and ADR 0010's golden set. It is built behind a port with a stand-in until an account and key exist.
 9. **The Rep in a Recording.** When the file has one channel per side, the uploader says at upload which channel is the Rep. Otherwise the Call waits after transcription, in a named state, until an Owner or Admin picks the Rep from the detected speakers in the portal. For per-side recordings this settles ADR 0010's stereo note: the channels are the speakers.
 10. **Large Recordings are streamed through the service to storage in parts** and never held whole in memory. This extends choice 1 of ADR 0016 (upload through the service); it does not reopen it.
@@ -31,7 +31,11 @@ None of the following was chosen by the owner.
 
 - **Transcript formats:** plain text with `Speaker: text` lines, WebVTT, SRT, and a documented JSON turn list; 5 MB. A Call with fewer than two speakers or no turns fails with a stated reason.
 - **The Rep in a Transcript:** the uploader names the Rep's speaker label; a label not found in the file fails the Call with a stated reason. With three or more speakers, one label is the Rep and every other speaker is on the Prospect's side.
-- **Recording formats:** mp3, m4a, wav, ogg, webm and flac; 500 MB and 3 hours.
+- **Recording formats:** mp3, m4a, wav, ogg, webm and flac; 500 MB and 3 hours. A streamed upload's content hash is computed while streaming, since ADR 0016's duplicate rule needs it, and the parts of an incomplete upload are discarded after a stated time.
+- **A Recording is per-side only when the uploader declares it and the service finds exactly two channels.** A one-channel file declared per-side is refused with a stated reason.
+- **The waiting state is `awaiting_rep`.** While a Call is in it no Moments exist (a Moment stores the Rep's following turns, so none can be built before the pick) and the Call is not in search. The portal lists such Calls for Owners and Admins, and any Owner or Admin may pick, not only the uploader. There is no timeout: the Call waits until picked or deleted, and counts toward the Organization's quota while it waits.
+- **An Owner or Admin can change the Rep of any Call afterwards** (channel or speaker label). The change rebuilds that Call's Moments through a queued job, never on the request path, with the same ordering guard as the Outcome re-tag.
+- **A Moment's Rep turns that follow it are bounded** by a count or size the ticket chooses, never unbounded.
 - **CSV template:** `deal_id` (required, the Organization's own identifier, unique per Organization), `outcome` (`won`, `lost`, `open`), `closed_at`, `amount`, `currency`, and optional `name`; 10 MB and 50,000 rows.
 - **An import is asynchronous and produces a report for each row.** Valid rows are applied and bad rows are reported, never silently dropped. A deal id repeated within one CSV is rejected for every repeat after the first. A row for an existing open Deal may set its Outcome and update its other columns; a row with `open` for an existing open Deal updates the other columns.
 - **A Call uploaded for a deal id that has no Deal creates an open Deal.** The import report and the portal list Deals that have Calls but have never appeared in a CSV, so a typo is visible.
@@ -42,8 +46,14 @@ None of the following was chosen by the owner.
 - **A transcription call has a timeout, a bounded jittered retry and an idempotency key.** A Recording whose transcription fails or times out ends `failed` with a stated reason.
 - **The original Recording is kept like an original document until purge.** It is never logged. It is sent to the vendor by a short-lived presigned URL, and the vendor must not train on it and must delete it after the job.
 - **Erasure and purge also delete the vendor's copy** and record that the vendor confirmed it. A transcription in flight is cancelled or its result discarded. Erasure covers Calls, Deals, Transcripts and Recordings.
-- **The same content under a different deal id is refused** with a stated reason, not silently linked to the first Deal. The same Call uploaded as both a Transcript and a Recording becomes two Calls, because the content hashes differ and no check can see they match; matching on the transcribed text could be added later.
+- **The same content under a different deal id is refused** with a stated reason, not silently linked to the first Deal. The same Call uploaded as both a Transcript and a Recording becomes two Calls, because the content hashes differ and no check can see they match. Search results and evidence counts (plan step 1.15) may then count it twice until matching exists, and an Owner or Admin can delete one of them.
+- **The confirmation of choice 12 is stored once per Organization** with the confirming member, the time and the version of the wording. Without a current confirmation, new uploads of Recordings and Transcripts are refused; existing Calls are kept and stay searchable.
 - **Consent.** ADR 0003 governs calls an Agent places. The confirmation in choice 12 is the control for historical uploads. Whether more is needed is legal advice the owner will take.
+
+## Open points for the owner
+
+- **Duplicate Calls:** accept the double counting of a Call uploaded as both a Transcript and a Recording, or build matching on the transcribed text.
+- **Questions for the lawyer,** beside the wording check; none is decided here: what a withdrawal must do to existing Calls; whether a changed wording needs a fresh confirmation from Organizations that confirmed an earlier version (until answered, the service asks again on a new version and refuses new uploads until confirmed); whether the HubSpot connection of plan step 1.16 needs the same confirmation.
 
 ## Considered options
 
@@ -63,8 +73,8 @@ None of the following was chosen by the owner.
 ## Consequences
 
 - The vendor adapter waits on an account and key. Until then phase 1 runs on a stand-in behind a port in the playbook service (ADR 0016).
-- **Before real audio goes to the vendor,** all of these hold: written confirmation of EU processing, deletion timing and no-training terms; the lawyer-checked confirmation wording of choice 12; and the trial and golden set. AssemblyAI is a subprocessor that sees call audio (ADR 0010), and Recordings hold the voices of Prospects.
-- AssemblyAI bills stereo per channel (ADR 0010). Per-side recordings use the channels as speakers (choice 9); how a recording of any other shape is billed or downmixed is decided when the adapter is built.
+- **Before real audio goes to the vendor,** all of these hold: written confirmation of EU processing, deletion timing and no-training terms; the lawyer-checked confirmation wording of choice 12; and the trial and golden set; and confirmation that AssemblyAI transcribes each channel separately with its own speaker. AssemblyAI is a subprocessor that sees call audio (ADR 0010), and Recordings hold the voices of Prospects.
+- AssemblyAI bills stereo per channel (ADR 0010). Per-side Recordings use the channels as speakers (choice 9) and so are billed per channel, about double the mono cost in ADR 0010's scenarios. How a Recording of any other shape is downmixed is decided when the adapter is built.
 - The 2026-10-13 report corrects ADR 0010's reason for rejecting Deepgram: diarization is included. Its AWS Transcribe figure also supersedes ADR 0010's price comparison.
 - A Call holds personal data in both its Recording and its Transcript until purge or erasure.
 - A Moment's Outcome exists in two places, Postgres and the index. The index copy may lag; the database copy decides.

@@ -103,7 +103,7 @@ Read the table this way: at 100,000 hours a month, the managed options that matt
 
 - Assume 15x to 40x real time for the full pipeline on an L40S once diarization and alignment are included. This is above the 12x to 19x I found, which were for Whisper large-v3 alone on consumer or workstation GPUs, so it is optimistic and unmeasured.
 - That is $1.86 divided by 15 to 40, so $0.05 to $0.12 per audio hour at full use.
-- Real queues are not full. At 40 to 50% utilisation it is $0.09 to $0.31 per audio hour ($0.05 divided by 0.5, to $0.12 divided by 0.4).
+- Real queues are not full. At 40 to 50% utilisation it is about $0.09 to $0.31 per audio hour (unrounded: $0.047 divided by 0.5 is $0.093; $0.124 divided by 0.4 is $0.31).
 - Spot instances on g6 could cut that by half, with interruption handling.
 
 **Fixed costs and burden (my estimate):**
@@ -169,6 +169,7 @@ Accessed 2026-10-13.
 - Any independent diarization benchmark on sales-call audio.
 - AWS GPU throughput for the self-hosted stack. The self-host cost range is my estimate.
 - Mistral Voxtral Transcribe pricing and diarization.
+- That AssemblyAI transcribes each channel of a two-channel file separately, with its own speaker.
 - Whether AssemblyAI bills stereo per channel for this model (ADR 0010 says it does; I did not confirm it).
 - AssemblyAI deletion timing and the scope of EU processing.
 - The Amazon Transcribe price: ADR 0010 uses $0.36 per hour, this report found $1.44 for the first tier from third-party sites, and neither was confirmed from AWS.
