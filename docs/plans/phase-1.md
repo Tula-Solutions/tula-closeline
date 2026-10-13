@@ -30,7 +30,7 @@ Each step is one ticket. "After" lists the steps that must be merged first.
 | 1.8 | core | Organizations (with Region), memberships, the Owner, Admin, Manager and Rep roles, Teams, invitations; role checks; cross-Organization tests | 1.3, 1.4, 1.5 |
 | 1.9 | auth | Token hook: ask core once at issuance and stamp Organization and role into the token, with a timeout and a defined failure behaviour | 1.7, 1.8 |
 | 1.10 | kit | Queue port with memory and AWS adapters; idempotent consumer helper; one behaviour suite run against both adapters | 1.1, 1.2 |
-| 1.11 | hub | Research: choose the vector database, embedding model and document parser. Compare price, EU Region availability and limits; record the choice as a decision record | — |
+| 1.11 | hub | Research: choose the vector database, embedding model and document parser. Compare price, EU Region availability and limits; record the choice as a decision record. Decided on 2026-10-12: [ADR 0010](../adr/0010-knowledge-ingestion-vendors.md) | — |
 | 1.12 | kit | Object storage port (memory and S3) and vector store port (memory and the vendor chosen in 1.11) | 1.10, 1.11 |
 | 1.13 | playbook | Document ingestion: upload, parse, chunk, embed, index, per Organization; queued, idempotent, resumable | 1.4, 1.5, 1.12 |
 | 1.14 | playbook | Sales history ingestion: call transcripts and a deal export with won or lost outcomes, linked by deal identifier; index the moments of each call with its outcome | 1.13 |
@@ -40,6 +40,7 @@ Each step is one ticket. "After" lists the steps that must be merged first.
 | 1.18 | infra | Choose the infrastructure-as-code tool; one dev environment in one Region on ECS Fargate with Postgres, queues, object storage and path-based routing; deploy from CI | 1.4 |
 | 1.19 | hub | Local development: one compose file for Postgres and local stand-ins for the queue and object storage, and a script that runs every service | 1.3, 1.10 |
 | 1.20 | hub | Phase 1 load test: ingestion throughput and search p95 against stated targets, with results recorded here | 1.15, 1.18 |
+| 1.21 | kit | Error reporting port with Sentry adapter (#24): `ErrorReporter` port, Sentry and memory adapters, a no-op when no DSN is set; Sentry is the error tracker for every service and the portal | — |
 
 Steps with no "after" (1.1, 1.2, 1.3, 1.11) start in parallel.
 
