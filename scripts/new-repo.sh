@@ -53,6 +53,12 @@ find "$dir" -type f -print0 | xargs -0 perl -pi -e \
   's/__NAME__/$ENV{NAME}/g; s/__SHORT__/$ENV{SHORT}/g; s/__KIND__/$ENV{KIND}/g; s/__DESC__/$ENV{DESC}/g'
 find "$dir" -name '*.sh' -exec chmod +x {} +
 
+# Private libraries are declared as git+ssh URLs; fetch them over https with the gh login, for
+# this run only, so the script works on a machine with no SSH key and no global rewrite.
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0='url.https://github.com/Tula-Solutions/.insteadOf'
+export GIT_CONFIG_VALUE_0='ssh://git@github.com/Tula-Solutions/'
+
 git -C "$dir" init -q -b develop
 "$hub/scripts/sync-shared.sh" "$dir"
 

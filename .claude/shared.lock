@@ -1,6 +1,6 @@
-# hub: 4b3b752
+# hub: 294b264
 4aa39861535d68d6cb903aac4197ba2e3c93c095c768e3e37c1113ff5204dd5c  .claude/CLAUDE.md
-e991caf0e4cda3210447b12b0a79b81c183d5081a31d81683c68ae359e77ad8c  .claude/COMMON.md
+05ea4e685a3208afbf179b2db4e7ebb8113c553ef1fef288b483d051d078c444  .claude/COMMON.md
 4e0f1f79a6965882c432710e380db5eb37aa6108eda81748494e725e687c45c2  .claude/agents/ollie-reviewer.md
 bda0bb38ea22287ba86a7b303159c27b2d0c9a8e863a633abe61d5d972a2557a  .claude/hooks/format-file.sh
 37fadb28dad63ce76fbae46f14b895e70e5f096dd3185d1596ff49178d558aee  .claude/hooks/protect-files.sh
@@ -8,7 +8,7 @@ cf899ea12951126528f72191f9583a9cdc81c6886ea7013c8ba754c57789c5e2  .claude/hooks/
 00e02b69b97b14956a4371aafbd3c44e8e8c821fdf2eafbeb578946cb1e4d208  .claude/hooks/shared-check.sh
 91c2a8f648b846c4815b2b7d0dfb36606ccd9a15291021f079e1d9de9b0a166e  .claude/hooks/stop-gate.sh
 48422043df69dd9c8c8a6e6f76ad9de81b73a0078242b24099e19c778b20482c  .claude/rules/testing.md
-bb964359f3814aecc742ed237814162b2fd1ac3046bd14ed310e0109514364ac  .claude/settings.json
+054d8a4afaea73873c7e9aaf822a63ba5d5fea15a972127eeabc342ccc18d7b7  .claude/settings.json
 66a771afb5240a629062d4d3286e276ad8d34605f3f32f0255e7420705b443af  .claude/skills/review-loop/SKILL.md
 082de8f1875bbaaeaa8cb179bda18fc9ebb68ade33df9dfa1309401af04befb5  .claude/skills/verify/SKILL.md
 2e05f96e9298970eeeb7371b193543775d78724c0bbf698ad6f17f94dee71b0e  .github/PULL_REQUEST_TEMPLATE.md

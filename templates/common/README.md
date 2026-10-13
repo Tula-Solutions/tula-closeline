@@ -8,7 +8,11 @@ holds the glossary, decision records, plans, issues and the shared workflow setu
 ## Getting started
 
 ```bash
-gh auth setup-git      # once: lets git fetch the private tula-closeline-* libraries over https
+# Once per machine, if you have no SSH key on GitHub: fetch the private tula-closeline-*
+# libraries over https with your gh login.
+gh auth setup-git
+git config --global url."https://github.com/Tula-Solutions/".insteadOf "ssh://git@github.com/Tula-Solutions/"
+
 bun install
 bun run verify
 ```

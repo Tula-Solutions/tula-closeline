@@ -27,7 +27,7 @@ jobs:
           TOKEN: ${{ secrets.CLOSELINE_REPO_TOKEN }}
         run: |
           if [ -n "$TOKEN" ]; then
-            git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+            git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
           fi
       - run: bun install --frozen-lockfile
       - run: bun run verify

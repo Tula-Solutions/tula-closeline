@@ -61,9 +61,12 @@ bench/                 benchmark suite (see Performance)
 `contract`, `db` and `kit` are consumed as a committed `dist/` over a git URL pinned to a tag:
 
 ```json
-"tula-closeline-contract": "github:Tula-Solutions/tula-closeline-contract#v0.1.0"
+"tula-closeline-contract": "git+ssh://git@github.com/Tula-Solutions/tula-closeline-contract.git#v0.1.0"
 ```
 
+- Use the `git+ssh` form exactly: Bun fetches `git+https` and `github:` URLs as API tarballs,
+  which fail for private repos. Agent sessions and CI rewrite it to authenticated https; a
+  person without an SSH key runs the one-time command in the README.
 - Never depend on a bare URL or a branch. A branch is allowed only inside an unmerged PR.
 - To use a newer version, change the tag and run `bun install`. Never `bun update` a git dependency.
 - In a library: the pre-commit hook rebuilds and stages `dist/`; CI rebuilds and fails on any

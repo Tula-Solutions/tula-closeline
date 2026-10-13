@@ -20,5 +20,5 @@
     "noUnusedParameters": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*", "scripts/**/*", "bunup.config.ts"]
+  "include": ["src/**/*"]
 }
