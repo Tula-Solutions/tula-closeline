@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { exitCodeFor, formatResult, runSmoke, type StepResult } from './dev-smoke.ts'
+import {
+  exitCodeFor,
+  formatResult,
+  parseSmokeArgs,
+  runSmoke,
+  type StepResult,
+} from './dev-smoke.ts'
 
 type Seen = { method: string; path: string; body: string }
 
@@ -124,5 +130,27 @@ describe('runSmoke', () => {
     expect(report).not.toContain(sent.password)
     expect(report).not.toContain(sent.email)
     expect(report).not.toMatch(/bearer/i)
+  })
+})
+
+describe('--strict', () => {
+  test('parses the flag and refuses anything else', () => {
+    expect(parseSmokeArgs([])).toEqual({ strict: false })
+    expect(parseSmokeArgs(['--strict'])).toEqual({ strict: true })
+    expect(parseSmokeArgs(['--loose'])).toEqual({ error: 'unknown argument: --loose' })
+  })
+
+  test('a skipped step is an error in strict mode and not otherwise', async () => {
+    const stack = fakeStack()
+    const results = await runSmoke(stack.targets, { timeoutMs: 1_000 })
+    stack.stop()
+    expect(results.some((result) => result.status === 'skip')).toBe(true)
+    expect(exitCodeFor(results)).toBe(0)
+    expect(exitCodeFor(results, true)).toBe(1)
+  })
+
+  test('strict still passes when nothing is skipped or failed', () => {
+    const results: StepResult[] = [{ name: 'a', status: 'pass', detail: '' }]
+    expect(exitCodeFor(results, true)).toBe(0)
   })
 })

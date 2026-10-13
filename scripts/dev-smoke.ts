@@ -170,12 +170,36 @@ export function formatResult(result: StepResult): string {
   return `${label}  ${result.name}${result.detail ? `: ${result.detail}` : ''}`
 }
 
-/** The process exit code for a set of results: 1 if any step failed, else 0. */
-export function exitCodeFor(results: readonly StepResult[]): number {
-  return results.some((result) => result.status === 'fail') ? 1 : 0
+/** The smoke command line: `--strict` makes a skipped step an error. */
+export function parseSmokeArgs(argv: readonly string[]): { strict: boolean } | { error: string } {
+  let strict = false
+  for (const arg of argv) {
+    if (arg === '--strict') {
+      strict = true
+    } else {
+      return { error: `unknown argument: ${arg}` }
+    }
+  }
+  return { strict }
+}
+
+/**
+ * The process exit code for a set of results: 1 if any step failed, else 0. With `strict`, a
+ * skipped step also gives 1: the mode CI uses once the services have a local mail stand-in
+ * (hub issue 38), so a skip there cannot hide a gap.
+ */
+export function exitCodeFor(results: readonly StepResult[], strict = false): number {
+  return results.some((result) => result.status === 'fail' || (strict && result.status === 'skip'))
+    ? 1
+    : 0
 }
 
 if (import.meta.main) {
+  const args = parseSmokeArgs(process.argv.slice(2))
+  if ('error' in args) {
+    process.stderr.write(`${args.error}\nusage: bun run dev:smoke [--strict]\n`)
+    process.exit(2)
+  }
   const targets = origins(resolvePorts(process.env))
   const results = await runSmoke(targets)
   for (const result of results) {
@@ -185,5 +209,8 @@ if (import.meta.main) {
   process.stdout.write(
     `\n${count('pass')} passed, ${count('fail')} failed, ${count('skip')} skipped\n`
   )
-  process.exit(exitCodeFor(results))
+  if (args.strict && count('skip') > 0) {
+    process.stdout.write('--strict: a skipped step is an error\n')
+  }
+  process.exit(exitCodeFor(results, args.strict))
 }
