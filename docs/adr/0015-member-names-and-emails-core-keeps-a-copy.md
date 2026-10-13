@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-10-13
-**Builds on:** ADR 0005, ADR 0007, ADR 0011
+**Builds on:** ADR 0005, ADR 0007, ADR 0011, ADR 0013
 
 ## Context
 
@@ -25,7 +25,10 @@ The contract carries the fields on the member response and on both internal sign
 ## Consequences
 
 - Personal data is held in two schemas. Erasure and export must cover both.
-- The copy can be stale until a change reaches core. The delivery of a change must be idempotent and retried with a bounded, jittered retry, so a lost or repeated delivery cannot leave a wrong name behind for long.
-- Auth is the source: when the copy and auth disagree, auth is right, and the next change delivery corrects core.
+- The copy can be stale until a change reaches core. Delivery of a change is idempotent and retried with a bounded, jittered retry.
+- An older change arriving late must not overwrite a newer one, so the update carries an ordering guard. Its form is left to the implementing ticket.
+- A final change that is lost leaves the copy wrong until the next change, unless a reconcile is added. That is left open.
+- Auth is the source: when the copy and auth disagree, auth is right.
+- The copy is first sent during sign-up, before the account is certain to be written, so core can briefly hold an email for an account that never exists. That is the orphan case of ADR 0011 and is cleaned up with it (hub issue 36).
 - The copy needs new columns on `core.memberships`, in a new migration in `tula-closeline-db`. Their names and whether they may be empty are left to that ticket; the table is empty everywhere, so no backfill is needed.
 - Work lands in this order: contract (payloads), db (columns), core, auth, portal. Role changes and removal work on user ids and do not wait for this.
