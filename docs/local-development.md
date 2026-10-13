@@ -9,7 +9,7 @@ bun run dev           # compose up, migrate, start core, auth and the portal; Ct
 bun run dev:smoke     # in another terminal: signs up and checks the running stack over HTTP
 bun run dev --down    # stop the compose containers (keeps the data)
 bun run dev --down --volumes   # also delete the database and storage data
-bun run dev:smoke --strict     # as dev:smoke, but a skipped step is an error (for CI, below)
+bun run dev:smoke --strict     # as dev:smoke, but a skipped step is an error (meant for CI, see below)
 # read the emails the services send: open http://127.0.0.1:8026
 ```
 
@@ -42,8 +42,8 @@ it should be, has no `node_modules`, or a port is taken.
 | Part | Where | Notes |
 | --- | --- | --- |
 | Postgres 18.6 (`postgres:18.6-alpine`) | `127.0.0.1:5440` | database `closeline`; roles from `tula-closeline-db`'s own `docker/postgres/init.sh` |
-| Mailbox: Mailpit v1.31.5 (web UI and HTTP API) | `http://127.0.0.1:8026` | in memory, so `--down` or a restart empties it; the SMTP port (1025) is not published; auth and core send to it through `MAIL_LOCAL_URL` |
-| Queue stand-in: ElasticMQ 1.7.1 (SQS API) | `http://127.0.0.1:9324` | queues `closeline-dev` and `closeline-dev-dlq` (placeholder names) |
+| Mailbox: Mailpit v1.31.5 (web UI and HTTP API) | `http://127.0.0.1:8026` | in memory, so `--down` or a restart empties it; its update check is off (`MP_DISABLE_VERSION_CHECK`), so it makes no outbound call; the SMTP port (1025) is not published; auth and core send to it through `MAIL_LOCAL_URL` |
+| Queue stand-in: ElasticMQ 1.7.1 (SQS API) | `http://127.0.0.1:9324` | queues `closeline-dev` and `closeline-dev-dlq` (placeholder names); its `/data` is a tmpfs, so no anonymous volume is left behind |
 | Object storage stand-in: Adobe S3Mock 5.2.3 (S3 API) | `http://127.0.0.1:9090` | bucket `closeline-dev`; any credentials; path-style addressing |
 | core | `http://127.0.0.1:3100` | `bun src/server.ts` in `tula-closeline-core` |
 | auth | `http://127.0.0.1:3001` | `bun src/server.ts` in `tula-closeline-auth` |
@@ -75,7 +75,7 @@ has a setting for either. They are here so the first service that needs one has 
 
 ## Order of a start
 
-1. Checks the clones, `docker compose`, and that the ports are free.
+1. Checks the clones, `docker compose`, and that the ports are free. A compose container that is already running keeps its port; every one that is not (for example the mailbox, when the stack was started by an older version of this file) has its port checked, and a clash is reported before anything starts.
 2. `docker compose up -d --wait` on `compose.dev.yaml` (project `closeline-dev`), until all four
    containers are healthy, then waits for the mailbox to answer `GET /livez` on the host port. A
    mailbox that does not answer stops the start (exit 1) before any role is touched.
@@ -133,20 +133,24 @@ script replaces the password of every login role on every start, so none stays v
 `bun run dev:smoke` calls the running stack over HTTP (every call with a timeout and a bounded
 retry; a sign-up, sign-in, verification or refresh is sent once, never retried) and prints PASS,
 FAIL or `skipped: <reason>` per step. It exits 1 if a step fails; with `--strict` it also exits 1
-if any step is skipped. In a healthy stack nothing is skipped, so CI uses `--strict`.
+if any step is skipped. In a healthy stack nothing is skipped, so `--strict` is the mode for CI. No workflow runs the
+stack yet: `.github/workflows/verify.yml` runs the hub's own checks only. Until a workflow starts
+the stack and runs `bun run dev:smoke --strict`, a person runs it.
 
 | Step | What it checks |
 | --- | --- |
 | auth ready, core ready, portal served, the mailbox ready, auth publishes EdDSA signing keys | each answers |
 | core refuses a request with no token and with a malformed one | `401 auth.unauthenticated` and `401 auth.token_invalid` |
 | sign up | `POST /v1/client/sign-ups` with a fresh `smoke-<random>@closeline-smoke.test` address (a reserved domain), a random password and an Organization name |
-| read the verification code | looks the email up in the mailbox (bounded wait) and takes the six-digit code from it |
+| read the verification code | looks the email up in the mailbox (bounded wait) and takes the six-digit code from it. Only a message whose `To` is exactly this run's address counts (Mailpit's `to:` search is a substring match); one message holding two codes, two links or none is an error; a late email is waited for until the deadline; a mailbox that answers 5xx or not as Mailpit does is reported as a mailbox failure, not as a missing email |
 | verify the email code, sign in | the code is accepted; sign-in with the password gives a session |
 | core `GET /v1/organization` and `GET /v1/members` | with the access token: the Organization in the token, and exactly one member, the Owner |
-| refresh the session | the refresh token rotates and the new access token works at core; the spent refresh token is never reused. The access token may be the same string as the last (it holds the session id and a one-second issue time), so only the refresh token is compared |
+| refresh the session | the refresh token rotates and the new access token works at core; the spent refresh token is not reused here (the next row does that on its own session). The access token may be the same string as the last (it holds the session id and a one-second issue time), so only the refresh token is compared |
 | create an Invitation | `POST /v1/invitations` for a new address, role `rep`, with an `Idempotency-Key` |
 | the Invitation email and its link | the email reaches the mailbox and its link points at the portal's `/sign-up` page |
-| a second sign-up cannot read the first Organization | a second, different user gets a different Organization id; `GET /v1/organization`, `/v1/members` and `/v1/invitations` with their token return nothing of the first (its Organization id, address, user ids, Invitation id), and `DELETE /v1/invitations/{id}` of the first Organization's Invitation answers `404`, leaving it pending |
+| create a Team | `POST /v1/teams` as the first user, for the isolation checks |
+| a second sign-up cannot read the first Organization | a second, different user gets a different Organization id. Reads: `GET /v1/organization`, `/v1/members`, `/v1/invitations` and `/v1/teams` with their token return nothing of the first (its Organization id, address, user and membership ids, Invitation and Team ids). The first Organization id sent in an `x-organization-id` header or an `organizationId` query with the second token is ignored or refused. Writes by id with the second token against the first Organization (`DELETE /v1/invitations/{id}`, `PATCH` and `DELETE /v1/teams/{id}`, `POST /v1/teams/{id}/members`, `PATCH /v1/members/{id}`, `POST /v1/invitations` with its `teamId`) each answer `404` with the documented code (`invitation.not_found`, `team.not_found`, `member.not_found`), and the first Organization is unchanged. Positive control: the first user then renames and deletes their own Team and revokes their own Invitation, so a route that answers `404` to everyone fails |
+| a replayed refresh token is refused and ends its session | last, on a throwaway sign-in: refresh twice, replay the first token, expect `401 session.reuse_detected`, then expect the newest token to be refused too (the contract says reuse ends the whole session) |
 
 A step whose earlier step failed or was skipped is skipped as `blocked by "<step>" (failed)`, so one
 failure does not bury the rest in noise; the run still exits 1. A stack started without a mailbox
@@ -154,8 +158,8 @@ failure does not bury the rest in noise; the run still exits 1. A stack started 
 it, with that reason.
 
 The report never contains a code, token, password, link or email address, and neither do error
-messages: every value the run has seen is replaced with `[hidden]` before anything is printed.
-Each run creates two users and one pending Invitation in the dev database, and leaves them there;
+messages: every value the run has seen is replaced with `[hidden]` before anything is printed, in its raw, URL-encoded and JSON-escaped forms. An error code from a service is printed only if it has the contract's `area.reason` shape; otherwise it shows as `(not a contract error code)`.
+Each run creates two users, a Team that is deleted again and a revoked Invitation in the dev database, and leaves them there;
 `bun run dev --down --volumes` removes them. The test only talks to the services' public HTTP
 routes and the mailbox, so it needs no back door in any service.
 
