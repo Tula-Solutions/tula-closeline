@@ -21,6 +21,8 @@ Common standards for all repos, this one included, are in `.claude/COMMON.md`.
 | `bun run verify` | Biome, typecheck, hook tests, and that the hub's own synced copies match `shared/` |
 | `bun run sync` | copy `shared/` into the hub and every sibling `tula-closeline-*` clone |
 | `bun run sync:check` | report drift without copying |
+| `bun run dev` | run the whole stack locally: Postgres, queue and storage stand-ins, then core, auth and the portal from the sibling clones; `--down` stops compose, `--down --volumes` also deletes its data ([`docs/local-development.md`](docs/local-development.md)) |
+| `bun run dev:smoke` | check the running stack over HTTP; `--strict` fails on a skipped step |
 | `scripts/new-repo.sh [--publish] <short> <library\|service\|bare> "<description>"` | create a repo |
 
 ## Changing the shared setup
