@@ -51,4 +51,4 @@ None of the following was chosen by the owner.
 - The model and OCR choices of ADR 0010 are unchanged. Its note that a model switch means re-embedding every Playbook also applies to a restore after a model switch.
 - A purge job removes the file, chunks and any remaining vectors in bounded batches.
 - Role checks for upload and delete rely on the role in the verified token; a test must show a Manager and a Rep are refused and a second Organization cannot see the document.
-- The plan gains the prerequisite rows 1.22 to 1.26 (contract, db, service skeleton, vector adapter, blocked adapters).
+- The plan gains the prerequisite rows 1.32 to 1.36 (contract, db, service skeleton, vector adapter, blocked adapters).
