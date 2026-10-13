@@ -122,9 +122,15 @@ jobs:
           for name in auth core; do
             clone="$REPOS/tula-closeline-$name"
             vendored_file="openapi/$name.openapi.json"
-            if ! vendored=$(tr -d '[:space:]' < "openapi/$name.commit" 2>/dev/null) || [ -z "$vendored" ]; then
+            vendored=$(tr -d '[:space:]' < "openapi/$name.commit" 2>/dev/null)
+            if ! printf '%s' "$vendored" | grep -Eq '^[0-9a-f]{40}$'; then
               problems=1
-              echo "- \`openapi/$name.commit\` is missing or empty in the portal." >> "$report"
+              echo "- \`openapi/$name.commit\` is missing or malformed in the portal (want 40 lowercase hex characters)." >> "$report"
+              continue
+            fi
+            if [ ! -r "$vendored_file" ]; then
+              problems=1
+              echo "- \`$vendored_file\` is missing or unreadable in the portal." >> "$report"
               continue
             fi
             if ! head=$(git -C "$clone" rev-parse --verify -q origin/develop) ||
@@ -135,7 +141,7 @@ jobs:
             fi
             if ! cmp -s "$vendored_file" "$RUNNER_TEMP/$name.openapi.json"; then
               problems=1
-              behind=$(git -C "$clone" rev-list --count "$vendored..$head" 2>/dev/null || echo unknown)
+              behind=$(git -C "$clone" rev-list --count --end-of-options "$vendored..$head" 2>/dev/null || echo unknown)
               {
                 echo "- \`$vendored_file\` differs from \`tula-closeline-$name\` \`origin/develop:openapi.json\`:"
                 echo "  vendored at \`$vendored\`, \`origin/develop\` is \`$head\` ($behind commits ahead)."

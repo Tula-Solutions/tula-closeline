@@ -10,10 +10,10 @@ The hub for Closeline. It holds no product code. It owns:
   PR template), mirrored into every repo by `scripts/sync-shared.sh`.
 - `templates/` — what a new repo starts from (`scripts/new-repo.sh`).
 - `.github/workflows/verify.yml` — the one CI definition every repo calls.
-- `.github/workflows/spec-drift.yml` — daily check that the portal's vendored auth and core OpenAPI
-  copies match `origin/develop` of those services (it runs the portal's `bun run spec:check`; a
-  skip is a failure). A scheduled failure opens or updates one `needs-triage` issue. Manual run:
-  `gh workflow run spec-drift.yml`.
+- `.github/workflows/spec-drift.yml` — daily check that compares the portal's vendored auth and core
+  OpenAPI copies by content with `origin/develop:openapi.json` of those services; a differing
+  recorded commit hash alone is only information. A scheduled failure opens or updates one
+  `needs-triage` issue and a scheduled pass closes it. Manual run: `gh workflow run spec-drift.yml`.
 - All issues, for every repo.
 
 Common standards for all repos, this one included, are in `.claude/COMMON.md`.
