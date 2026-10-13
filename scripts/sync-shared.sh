@@ -7,7 +7,7 @@
 # --check copies nothing and exits 1 if any target differs from the hub's copy.
 #
 # Everything under shared/ is mirrored to the same path in the target. Repos other than the hub
-# also receive GLOSSARY.md and docs/agents/*.md from the hub root. Each target gets
+# also receive GLOSSARY.md, biome.json and docs/agents/*.md from the hub root. Each target gets
 # .claude/shared.lock ("<sha256>  <path>" per line), which protect-files.sh and shared-check.sh read.
 set -euo pipefail
 
@@ -36,7 +36,9 @@ files_for() {
       printf '%s\t%s\n' "$hub/shared/$rel" "$rel"
     done
   if [ "$target" != "$hub" ]; then
-    for rel in GLOSSARY.md docs/agents/domain.md docs/agents/issue-tracker.md docs/agents/triage-labels.md; do
+    # biome.json is canonical at the hub root, not under shared/: Biome refuses a second root
+    # config nested inside a project.
+    for rel in GLOSSARY.md biome.json docs/agents/domain.md docs/agents/issue-tracker.md docs/agents/triage-labels.md; do
       printf '%s\t%s\n' "$hub/$rel" "$rel"
     done
   fi

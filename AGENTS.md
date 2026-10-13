@@ -29,8 +29,10 @@ Common standards for all repos, this one included, are in `.claude/COMMON.md`.
 2. `bun run sync`, then `bun run verify` here.
 3. Commit the hub, then commit the synced files in each repo (`chore: sync shared setup`).
 
-`shared/biome.json` is copied unchanged from tula-auth. Its ignore list still names tula-auth's
-paths; each repo scopes `biome check` to its source folders in `package.json` instead.
+`biome.json` is the one shared file that is canonical at the hub root, not under `shared/`: Biome
+refuses a second root config nested in a project. It is copied unchanged from tula-auth, so its
+ignore list still names tula-auth's paths; each repo scopes `biome check` to its source folders in
+`package.json` instead.
 
 ## Running the loop across repos (lead session)
 
