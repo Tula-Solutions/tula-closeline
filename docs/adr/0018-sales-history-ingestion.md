@@ -31,12 +31,12 @@ None of the following was chosen by the owner.
 
 - **Transcript formats:** plain text with `Speaker: text` lines, WebVTT, SRT, and a documented JSON turn list; 5 MB. A Call with fewer than two speakers or no turns fails with a stated reason.
 - **The Rep in a Transcript:** the uploader names the Rep's speaker label; a label not found in the file fails the Call with a stated reason. With three or more speakers, one label is the Rep and every other speaker is on the Prospect's side.
-- **Recording formats:** mp3, m4a, wav, ogg, webm and flac; 500 MB and 3 hours. A streamed upload's content hash is computed while streaming, since ADR 0016's duplicate rule needs it, and the parts of an incomplete upload are discarded after a stated time.
+- **Recording formats:** mp3, m4a, wav, ogg, webm and flac; 500 MB and 3 hours. A streamed upload's content hash is computed while streaming, since ADR 0016's duplicate rule needs it, and the parts of an incomplete upload are discarded after a time the ticket sets; erasure and purge also remove the parts of an incomplete upload.
 - **A Recording is per-side only when the uploader declares it and the service finds exactly two channels.** A one-channel file declared per-side is refused with a stated reason.
 - **The waiting state is `awaiting_rep`.** While a Call is in it no Moments exist (a Moment stores the Rep's following turns, so none can be built before the pick) and the Call is not in search. The portal lists such Calls for Owners and Admins, and any Owner or Admin may pick, not only the uploader. There is no timeout: the Call waits until picked or deleted, and counts toward the Organization's quota while it waits.
-- **An Owner or Admin can change the Rep of any Call afterwards** (channel or speaker label). The change rebuilds that Call's Moments through a queued job, never on the request path, with the same ordering guard as the Outcome re-tag.
+- **An Owner or Admin can change the Rep of any Call afterwards** (channel or speaker label). The change rebuilds that Call's Moments through a queued job, never on the request path, with the same ordering guard as the Outcome re-tag. While it rebuilds, the Call is out of search until the rebuild finishes, never a mix of old and new.
 - **A Moment's Rep turns that follow it are bounded** by a count or size the ticket chooses, never unbounded.
-- **CSV template:** `deal_id` (required, the Organization's own identifier, unique per Organization), `outcome` (`won`, `lost`, `open`), `closed_at`, `amount`, `currency`, and optional `name`; 10 MB and 50,000 rows.
+- **CSV template:** `deal_id` (required, the Organization's own identifier, unique per Organization; compared after trimming surrounding whitespace and otherwise exact and case-sensitive, which the ticket may tighten), `outcome` (`won`, `lost`, `open`), `closed_at`, `amount`, `currency`, and optional `name`; 10 MB and 50,000 rows.
 - **An import is asynchronous and produces a report for each row.** Valid rows are applied and bad rows are reported, never silently dropped. A deal id repeated within one CSV is rejected for every repeat after the first. A row for an existing open Deal may set its Outcome and update its other columns; a row with `open` for an existing open Deal updates the other columns.
 - **A Call uploaded for a deal id that has no Deal creates an open Deal.** The import report and the portal list Deals that have Calls but have never appeared in a CSV, so a typo is visible.
 - **Upload, delete, restore, retention and purge follow ADR 0016 exactly:** upload through the service, soft delete, 30 days, Owner and Admin write. A Deal cannot be deleted on its own in phase 1; it goes with its Organization's erasure. Deleting a Call removes its Moments from search as ADR 0016 does for a document.
@@ -53,7 +53,7 @@ None of the following was chosen by the owner.
 ## Open points for the owner
 
 - **Duplicate Calls:** accept the double counting of a Call uploaded as both a Transcript and a Recording, or build matching on the transcribed text.
-- **Questions for the lawyer,** beside the wording check; none is decided here: what a withdrawal must do to existing Calls; whether a changed wording needs a fresh confirmation from Organizations that confirmed an earlier version (until answered, the service asks again on a new version and refuses new uploads until confirmed); whether the HubSpot connection of plan step 1.16 needs the same confirmation.
+- **Questions for the lawyer,** beside the wording check; none is decided here, and the defaults in the parentheses are interim behaviour until answered: what a withdrawal must do to existing Calls; whether a changed wording needs a fresh confirmation from Organizations that confirmed an earlier version (until answered, the service asks again on a new version and refuses new uploads until confirmed); whether the HubSpot connection of plan step 1.16 needs the same confirmation.
 
 ## Considered options
 
