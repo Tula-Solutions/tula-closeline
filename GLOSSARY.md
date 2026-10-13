@@ -70,3 +70,31 @@ _Avoid_: Voice clone, custom voice
 **Contact Consent**:
 A stored record that a Prospect agreed to be contacted by an Organization's Agent on one named channel.
 _Avoid_: Calling consent, opt-in, permission
+
+**Document**:
+A file an Organization uploaded to its Playbook, such as a sales deck or product guide.
+_Avoid_: Asset, knowledge article, attachment
+
+**Call**:
+A conversation between a Prospect and a Rep or an Agent, live or uploaded from the Organization's past.
+_Avoid_: Meeting, session, conversation
+
+**Recording**:
+The audio of a Call.
+_Avoid_: Audio file, voice file
+
+**Transcript**:
+The written turns of a Call, each attributed to one speaker.
+_Avoid_: Call notes, script, captions
+
+**Deal**:
+A sale an Organization is pursuing or has closed with a Prospect, named by the Organization's own identifier.
+_Avoid_: Opportunity, lead, order
+
+**Outcome**:
+Whether a Deal was won, lost or is still open.
+_Avoid_: Result, status, disposition
+
+**Moment**:
+A short window of consecutive turns in a Call, kept with its Deal's Outcome so search can find similar ones.
+_Avoid_: Snippet, segment, chunk, clip
