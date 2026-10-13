@@ -12,7 +12,7 @@ The proxy question came from the review of auth's membership adapter (hub issue 
 
 ## Decision
 
-1. **Services authenticate to each other with a shared secret in a bearer header.** The receiver compares it in constant time. Each calling service has its own secret; that sentence is the lead's reading of the owner's decision, applied as services are added (today auth is the only caller).
+1. **Services authenticate to each other with a shared secret in a bearer header.** The receiver compares it in constant time. Each calling service has its own secret; that sentence is the lead's reading of the owner's decision, applied as services are added (today auth calls core).
 2. **Rotation is two secrets at once.** The receiver accepts the old and the new secret for a caller until the caller has moved over, then drops the old one.
 3. **Internal routes are never exposed through the public load balancer.** This whole rule is the lead's reading of the owner's decision, applied as services are added, and a requirement on infrastructure (hub issue 19): only the routes the portal and other clients are meant to call are routed there.
 4. **Service-to-service calls never go through an HTTP proxy named in the environment.** They use a transport that ignores proxy variables, or the service refuses to boot unless `NO_PROXY` covers the internal hosts. A helper in `tula-closeline-kit` implements the choice, and every internal call uses it.
