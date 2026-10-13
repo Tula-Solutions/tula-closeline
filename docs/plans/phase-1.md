@@ -26,9 +26,9 @@ Each step is one ticket. "After" lists the steps that must be merged first.
 | 1.4 | core | Service skeleton in the hexagonal layout: container, ports, error handler, request ids, OpenAPI document, health and readiness; then fold it back into `templates/service` in the hub | 1.1, 1.2 |
 | 1.5 | kit | Token verification middleware: offline JWKS, EdDSA, checks `kid`, `iss`, `aud`, `exp`, exposes Organization and role | 1.2 |
 | 1.6 | db | Auth schema: tula-auth's tables and migrations brought into the `auth` schema | 1.3 |
-| 1.7 | auth | Copy tula-auth's server (email and password, verification, sessions, refresh, JWKS) with its tests and conformance scenarios; one fixed project per Region; record the source commit | 1.4, 1.6 |
-| 1.8 | core | Organizations (with Region), memberships, the Owner, Admin, Manager and Rep roles, Teams, invitations; role checks; cross-Organization tests | 1.3, 1.4, 1.5 |
-| 1.9 | auth | Token hook: ask core once at issuance and stamp Organization and role into the token, with a timeout and a defined failure behaviour | 1.7, 1.8 |
+| 1.7 | auth | Copy tula-auth's server (email and password, verification, sessions, refresh, JWKS) with its tests and conformance scenarios; one fixed project per Region; record the source commit; sign-up creates an Organization or accepts an invitation, see [ADR 0011](../adr/0011-membership-model.md) | 1.4, 1.6 |
+| 1.8 | core | Organizations (with Region), memberships, the Owner, Admin, Manager and Rep roles, Teams, invitations; role checks; cross-Organization tests; the directory lookups and one Organization per user, see [ADR 0011](../adr/0011-membership-model.md) | 1.3, 1.4, 1.5 |
+| 1.9 | auth | Token hook: ask core once at issuance and stamp Organization and role into the token, with a timeout and a defined failure behaviour; sign-up calls core the same way, see [ADR 0011](../adr/0011-membership-model.md) | 1.7, 1.8 |
 | 1.10 | kit | Queue port with memory and AWS adapters; idempotent consumer helper; one behaviour suite run against both adapters | 1.1, 1.2 |
 | 1.11 | hub | Research: choose the vector database, embedding model and document parser. Compare price, EU Region availability and limits; record the choice as a decision record. Decided on 2026-10-12: [ADR 0010](../adr/0010-knowledge-ingestion-vendors.md) | — |
 | 1.12 | kit | Object storage port (memory and S3) and vector store port (memory and the vendor chosen in 1.11) | 1.10, 1.11 |

@@ -31,6 +31,14 @@ _Avoid_: User, seller, salesperson, sales agent
 A group of Reps inside an Organization, overseen by one or more Managers.
 _Avoid_: Group, squad, department
 
+**Membership**:
+A person's place in one Organization, with the role they hold there.
+_Avoid_: Seat, license
+
+**Invitation**:
+An offer, sent to an email address, to join an Organization in a stated role.
+_Avoid_: Invite link, signup link
+
 **Prospect**:
 A person an Organization is trying to sell to.
 _Avoid_: Lead, contact, customer, user
