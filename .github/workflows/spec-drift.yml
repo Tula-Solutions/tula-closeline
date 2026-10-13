@@ -6,7 +6,9 @@ name: spec-drift
 # is expected to exist here, so a `skipped:` line from the script is an error, not a pass.
 #
 # A scheduled failure also opens one hub issue labelled `needs-triage`, or updates that issue if it
-# is still open. Fix: in the portal, `bun run generate:api -- --from <auth clone>` and
+# is still open; each scheduled failure rewrites that issue's body with the latest report. A scheduled
+# run that passes comments on the open issue and closes it; a manual run never touches issues.
+# Fix: in the portal, `bun run generate:api -- --from <auth clone>` and
 # `--core-from <core clone>`, then commit the result.
 
 on:
@@ -70,35 +72,64 @@ jobs:
         working-directory: repos/tula-closeline-portal
         run: |
           set +e
+          report="$RUNNER_TEMP/report.md"
+          problems=0
+          printf '## Vendored API specs behind their services\n\n' > "$report"
+
+          # Always runs on exit, so the report output exists however the step ends; the step
+          # still exits non-zero whenever anything is wrong.
+          finish() {
+            code=$?
+            trap - EXIT
+            if [ "$code" -ne 0 ] && [ "$problems" -eq 0 ]; then
+              echo "- The check step stopped unexpectedly (exit $code)." >> "$report"
+              problems=1
+            fi
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$problems" -ne 0 ]; then
+              {
+                echo 'report<<SPEC_DRIFT_EOF'
+                cat "$report"
+                echo 'SPEC_DRIFT_EOF'
+              } >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            echo "All vendored specs match their services." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          trap finish EXIT
+
           bun run spec:check --siblings-dir "$REPOS" 2>&1 | tee "$RUNNER_TEMP/spec-check.log"
           status=${PIPESTATUS[0]}
-          set -e
-
-          problems=0
-          {
-            echo "## Vendored API specs behind their services"
-            echo
-          } > "$RUNNER_TEMP/report.md"
 
           # Here every clone exists, so a skip means the comparison did not happen.
           if grep -q '^skipped:' "$RUNNER_TEMP/spec-check.log"; then
             problems=1
-            echo "- A comparison was skipped, so nothing was checked:" >> "$RUNNER_TEMP/report.md"
-            grep '^skipped:' "$RUNNER_TEMP/spec-check.log" | sed 's/^/  - /' >> "$RUNNER_TEMP/report.md"
+            echo "- A comparison was skipped, so nothing was checked:" >> "$report"
+            grep '^skipped:' "$RUNNER_TEMP/spec-check.log" | sed 's/^/  - /' >> "$report"
           fi
 
-          # Name each copy that is behind, with the commit the portal holds and the service's head.
+          # The script's exit status is authoritative; this loop only adds the commits-ahead count
+          # and names the commits, so a missing file or ref is reported rather than fatal.
           for name in auth core; do
             clone="$REPOS/tula-closeline-$name"
-            vendored=$(tr -d '[:space:]' < "openapi/$name.commit")
-            head=$(git -C "$clone" rev-parse origin/develop)
+            if ! vendored=$(tr -d '[:space:]' < "openapi/$name.commit" 2>/dev/null) || [ -z "$vendored" ]; then
+              problems=1
+              echo "- \`openapi/$name.commit\` is missing or empty in the portal." >> "$report"
+              continue
+            fi
+            if ! head=$(git -C "$clone" rev-parse --verify -q origin/develop); then
+              problems=1
+              echo "- \`origin/develop\` does not resolve in the \`tula-closeline-$name\` clone." >> "$report"
+              continue
+            fi
             if [ "$vendored" != "$head" ]; then
               problems=1
               behind=$(git -C "$clone" rev-list --count "$vendored..$head" 2>/dev/null || echo unknown)
               {
                 echo "- \`openapi/$name.openapi.json\` is behind \`tula-closeline-$name\`:"
                 echo "  vendored at \`$vendored\`, \`origin/develop\` is \`$head\` ($behind commits ahead)."
-              } >> "$RUNNER_TEMP/report.md"
+              } >> "$report"
             fi
           done
 
@@ -111,30 +142,22 @@ jobs:
               echo '```'
               tail -n 40 "$RUNNER_TEMP/spec-check.log"
               echo '```'
-            } >> "$RUNNER_TEMP/report.md"
+            } >> "$report"
           fi
 
-          {
-            echo
-            echo "Refresh in the portal: \`bun run generate:api -- --from ../tula-closeline-auth --core-from ../tula-closeline-core\`, then commit the result."
-          } >> "$RUNNER_TEMP/report.md"
-
-          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
           if [ "$problems" -ne 0 ]; then
             {
-              echo 'report<<SPEC_DRIFT_EOF'
-              cat "$RUNNER_TEMP/report.md"
-              echo 'SPEC_DRIFT_EOF'
-            } >> "$GITHUB_OUTPUT"
-            exit 1
+              echo
+              echo "Refresh in the portal: \`bun run generate:api -- --from ../tula-closeline-auth --core-from ../tula-closeline-core\`, then commit the result."
+            } >> "$report"
           fi
-          echo "All vendored specs match their services." >> "$GITHUB_STEP_SUMMARY"
 
-  # Only the scheduled run files an issue; a manual run reports in its own summary. Idempotent: the
-  # open issue with this title is edited in place, and one is created only when none is open.
+  # Only the scheduled run touches issues; a manual run reports in its own summary. Idempotent: the
+  # open issue with this title is edited in place (failure) or commented on and closed (success),
+  # and one is created only when none is open.
   issue:
     needs: check
-    if: ${{ always() && needs.check.result == 'failure' && github.event_name == 'schedule' }}
+    if: ${{ always() && github.event_name == 'schedule' && (needs.check.result == 'failure' || needs.check.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -142,15 +165,23 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      RESULT: ${{ needs.check.result }}
       REPORT: ${{ needs.check.outputs.report }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       TITLE: 'Vendored API spec is behind its service'
     steps:
-      - name: Open or update the drift issue
+      - name: Open, update or close the drift issue
         run: |
-          body=$(printf '%s\n\nLast seen by %s (hub issue 44).\n' "${REPORT:-The spec-drift check failed before it could write a report.}" "$RUN_URL")
           existing=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
             | jq -r --arg t "$TITLE" 'map(select(.title == $t))[0].number // empty')
+          if [ "$RESULT" = success ]; then
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body "The spec-drift check passed on $RUN_URL; closing."
+              gh issue close "$existing"
+            fi
+            exit 0
+          fi
+          body=$(printf '%s\n\nLast seen by %s (hub issue 44).\n' "${REPORT:-The spec-drift check failed before it could write a report.}" "$RUN_URL")
           if [ -n "$existing" ]; then
             gh issue edit "$existing" --body "$body"
           else
