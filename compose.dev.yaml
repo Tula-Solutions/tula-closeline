@@ -1,0 +1,105 @@
+# Closeline local development stack: Postgres plus local stand-ins for the queue and object
+# storage. Run it through `bun run dev` (scripts/dev.ts); see docs/local-development.md.
+#
+# LOCAL DEVELOPMENT ONLY. Every port binds to 127.0.0.1, because Docker bypasses host firewalls.
+# The passwords below exist only to create the database once: scripts/dev.ts replaces every one of
+# them with a fresh random value each time it starts, so none of them stays valid.
+#
+# Ports (override with the variables shown): Postgres 5440 (CLOSELINE_DEV_POSTGRES_PORT), the queue
+# 9324 (CLOSELINE_DEV_QUEUE_PORT), object storage 9090 (CLOSELINE_DEV_STORAGE_PORT). 5434 to 5437 belong to the repos' own test databases.
+#
+# The queue and object storage are provisioned but nothing consumes them yet: the queue and
+# object storage ports in tula-closeline-kit (plan steps 1.10 and 1.12) are not built.
+name: closeline-dev
+
+services:
+  postgres:
+    # Postgres 18 is the minimum (ADR 0011) and the version CI runs. The digest is the one the
+    # sibling repos' compose files pin.
+    image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    environment:
+      # Bootstrap values for the first start only; scripts/dev.ts rotates all five roles.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: bootstrap-local-only-replaced-on-every-start
+      POSTGRES_DB: closeline
+      CLOSELINE_OWNER_PASSWORD: bootstrap-local-only-replaced-on-every-start
+      CLOSELINE_AUTH_PASSWORD: bootstrap-local-only-replaced-on-every-start
+      CLOSELINE_CORE_PASSWORD: bootstrap-local-only-replaced-on-every-start
+      CLOSELINE_PLAYBOOK_PASSWORD: bootstrap-local-only-replaced-on-every-start
+    ports: ['127.0.0.1:${CLOSELINE_DEV_POSTGRES_PORT:-5440}:5432']
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      # The roles come from the database library's own bootstrap, read from the sibling clone.
+      - ${CLOSELINE_DB_DIR:-../tula-closeline-db}/docker/postgres/init.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
+      - ${CLOSELINE_DB_DIR:-../tula-closeline-db}/docker/postgres/init.sql:/etc/closeline/init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d closeline']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # SQS stand-in (plan step 1.10: the queue port has a memory and an AWS adapter).
+  queue:
+    image: softwaremill/elasticmq-native:1.7.1@sha256:e4580ab9ad1bd5cd37b4ba04911bc5ccc8cd2d9ab4de56ece65acee71c24e05c
+    ports: ['127.0.0.1:${CLOSELINE_DEV_QUEUE_PORT:-9324}:9324']
+    configs:
+      - source: elasticmq
+        target: /opt/elasticmq.conf
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null "http://127.0.0.1:9324/?Action=ListQueues" || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  # S3 stand-in (plan step 1.12: the object storage port has a memory and an S3 adapter).
+  storage:
+    image: adobe/s3mock:5.2.3@sha256:ab01a6946750f451ca215a47e91030695b260e4003b8a5a6201d25029b8fca92
+    # The image runs as an unprivileged user that cannot write to a fresh named volume.
+    user: root
+    environment:
+      COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: closeline-dev
+      COM_ADOBE_TESTING_S3MOCK_STORE_RETAIN_FILES_ON_EXIT: 'true'
+      COM_ADOBE_TESTING_S3MOCK_STORE_ROOT: /data
+    ports: ['127.0.0.1:${CLOSELINE_DEV_STORAGE_PORT:-9090}:9090']
+    volumes:
+      - storage-data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O /dev/null http://127.0.0.1:9090/ || exit 1']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+configs:
+  # Placeholder queue names: the queue port (plan step 1.10) decides the real ones.
+  elasticmq:
+    content: |
+      include classpath("application.conf")
+      node-address {
+        protocol = http
+        host = localhost
+        port = 9324
+        context-path = ""
+      }
+      rest-sqs {
+        enabled = true
+        bind-port = 9324
+        bind-hostname = "0.0.0.0"
+        sqs-limits = strict
+      }
+      queues {
+        closeline-dev-dlq { }
+        closeline-dev {
+          defaultVisibilityTimeout = 30 seconds
+          deadLettersQueue {
+            name = "closeline-dev-dlq"
+            maxReceiveCount = 5
+          }
+        }
+      }
+
+volumes:
+  postgres-data:
+  storage-data:

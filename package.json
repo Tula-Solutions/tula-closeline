@@ -12,6 +12,8 @@
     "test": "bun test scripts",
     "sync": "bash scripts/sync-shared.sh",
     "sync:check": "bash scripts/sync-shared.sh --check",
+    "dev": "bun scripts/dev.ts",
+    "dev:smoke": "bun scripts/dev-smoke.ts",
     "verify": "bun run check && bun run typecheck && bun run test && bash scripts/sync-shared.sh --check .",
     "verify:changed": "bun run verify"
   },
