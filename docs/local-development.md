@@ -19,7 +19,11 @@ bun run dev:smoke --strict     # as dev:smoke, but a skipped step is an error (f
   (it checks `DOCKER_HOST` and, when that is unset, `docker context inspect`), so it cannot start
   containers or change database roles on a remote host. `DOCKER_HOST`, `DOCKER_CONTEXT` and
   `DOCKER_CONFIG` are passed to the compose commands only, so Colima, Rancher and Podman sockets
-  work; no other process gets them.
+  work; no other process gets them. `--down` and `--down --volumes` go through the same check
+  before any Docker command, so they cannot delete volumes on a remote host. The check accepts any
+  `unix://` socket: it cannot tell a daemon on this machine from a remote one reached through a
+  forwarded socket (for example `ssh -L /tmp/docker.sock:/var/run/docker.sock`), so do not point
+  `DOCKER_HOST` or a context at such a socket.
 - Clone `tula-closeline-db`, `-auth`, `-core` and `-portal` next to this repo (or point
   `CLOSELINE_SIBLINGS_DIR` at the folder that holds them) and run `bun install` in each. The git
   dependencies are private; if you have no SSH key on GitHub, do the one-time `gh auth setup-git`
@@ -76,7 +80,12 @@ has a setting for either. They are here so the first service that needs one has 
 Each child's output is prefixed (`[core]`, `[auth]`, `[portal]`) and scrubbed of this run's
 secrets. If one exits, or any step after the first spawn fails, the others are stopped and the
 script exits 1. On Ctrl-C, SIGTERM or SIGHUP it stops the three services and leaves compose
-running, so the next start is quick. The docker, psql and migrate steps each have a timeout.
+running, so the next start is quick. A signal during `docker compose up`, the role rotation or the
+migration stops that step's process, starts no service and exits 130. The docker, psql and
+migrate steps each have a timeout. Stopping a step kills the client, not the work it asked for: a
+`docker compose exec psql` that times out or is interrupted may still finish inside the container.
+That is harmless here, because the rotation is idempotent (it sets the same five roles to a
+password the next start replaces) and runs again on every start.
 A SIGKILL of the script itself cannot be caught and leaves the services running; the next start's
 port check names them (`port 3001 (auth) is already in use`), and you stop them by hand.
 
@@ -93,9 +102,10 @@ One value is fixed: auth's `AUTH_MASTER_KEY` is left unset, so auth uses its bui
 key, which it refuses outside `ENVIRONMENT=local`. It seals the signing keys stored in the
 database, so a new one each run would lock them out. All services run with `ENVIRONMENT=local`.
 The environment a child gets is built from a short allowlist, so a `DATABASE_URL` or
-`ENVIRONMENT` exported in your shell cannot leak in. The script's own processes read no `.env`
-file: the services and the migration run with `--no-env-file` (the migration as a script file,
-because a nested `bun run` would load one), and the compose commands run with
+`ENVIRONMENT` exported in your shell cannot leak in. No `.env` file is read: `bun run dev` and
+`bun run dev:smoke` start Bun with `--no-env-file` (run `bun scripts/dev.ts` directly and you must
+pass it yourself), the services and the migration run with `--no-env-file` (the migration as a
+script file, because a nested `bun run` would load one), and the compose commands run with
 `--env-file /dev/null`, which stops compose loading a `.env` from the hub. That isolation ends at
 the services' own code: nothing here stops a service reading a file itself.
 
