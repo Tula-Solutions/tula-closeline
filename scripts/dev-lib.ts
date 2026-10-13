@@ -1,6 +1,6 @@
 // The logic behind `bun run dev` (scripts/dev.ts) and `bun run dev:smoke` (scripts/dev-smoke.ts)
 // that can be tested without Docker: arguments, ports, secrets, environments, output handling.
-import { randomBytes } from 'node:crypto'
+import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { join } from 'node:path'
@@ -105,8 +105,19 @@ export function randomHex(bytes: number, random: (size: number) => Buffer = rand
   return random(bytes).toString('hex')
 }
 
-/** The Postgres roles whose passwords are replaced on every start. */
-export const ROLES = ['postgres', 'closeline_owner', 'closeline_auth', 'closeline_core'] as const
+/**
+ * Every Postgres login role of the dev database, and the only list of them: their passwords are
+ * replaced on every start. `compose.dev.yaml` names the same roles in its `*_PASSWORD` variables;
+ * a test fails if one has no entry here, and `dev.ts` asks the database for its login roles and
+ * stops if one is missing from this list.
+ */
+export const ROLES = [
+  'postgres',
+  'closeline_owner',
+  'closeline_auth',
+  'closeline_core',
+  'closeline_playbook',
+] as const
 
 /** One of the roles in {@link ROLES}. */
 export type Role = (typeof ROLES)[number]
@@ -132,20 +143,105 @@ export function secretValues(secrets: Secrets): string[] {
   return [...Object.values(secrets.passwords), secrets.internalToken]
 }
 
-/** The SQL that gives each role its password for this run; reads only hex passwords. */
-export function rotationSql(secrets: Secrets): string {
+const SCRAM_ITERATIONS = 4096
+
+/**
+ * The SCRAM-SHA-256 verifier Postgres stores for a password (RFC 7677, as Postgres formats it:
+ * `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`). Sending the verifier instead of
+ * the password means a failed or logged statement never contains the password.
+ */
+export function scramVerifier(
+  password: string,
+  salt: Buffer = randomBytes(16),
+  iterations = SCRAM_ITERATIONS
+): string {
+  const salted = pbkdf2Sync(password, salt, iterations, 32, 'sha256')
+  const clientKey = createHmac('sha256', salted).update('Client Key').digest()
+  const storedKey = createHash('sha256').update(clientKey).digest()
+  const serverKey = createHmac('sha256', salted).update('Server Key').digest()
+  return `SCRAM-SHA-256$${iterations}:${salt.toString('base64')}$${storedKey.toString('base64')}:${serverKey.toString('base64')}`
+}
+
+/**
+ * The SQL that gives each role its password for this run, as a SCRAM verifier: the clear-text
+ * password is never in the statement, so it cannot reach the Postgres log. Reads only hex.
+ */
+export function rotationSql(secrets: Secrets, salt: () => Buffer = () => randomBytes(16)): string {
   return `${ROLES.map((role) => {
     const password = secrets.passwords[role]
     if (!/^[0-9a-f]{32,}$/.test(password)) {
       throw new Error(`refusing to build SQL from a password that is not hex (${role})`)
     }
-    return `ALTER ROLE ${role} PASSWORD '${password}';`
+    return `ALTER ROLE ${role} PASSWORD '${scramVerifier(password, salt())}';`
   }).join('\n')}\n`
 }
 
-/** A connection string for one login on the dev Postgres. */
-export function databaseUrl(role: Role, secrets: Secrets, ports: Ports): string {
-  return `postgres://${role}:${secrets.passwords[role]}@127.0.0.1:${ports.postgres}/closeline`
+/** The query `dev.ts` runs to list every role that can log in. */
+export const LOGIN_ROLES_SQL = 'select rolname from pg_roles where rolcanlogin order by 1'
+
+/** Login roles in `psql -At` output that {@link ROLES} does not replace the password of. */
+export function unrotatedLoginRoles(output: string): string[] {
+  const known: readonly string[] = ROLES
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !known.includes(line))
+}
+
+/** Loopback addresses: the only hosts the dev database may be reached at. */
+const LOOPBACK_HOSTS = ['127.0.0.1', '::1', '[::1]', 'localhost']
+
+/** Throws unless `url` is a Postgres URL whose host is a loopback address. */
+export function assertLoopbackDatabaseUrl(url: string): void {
+  let host: string
+  try {
+    host = new URL(url).hostname
+  } catch {
+    throw new Error('the database URL is not a valid URL')
+  }
+  if (!LOOPBACK_HOSTS.includes(host)) {
+    throw new Error(
+      `refusing to use a database at ${host || '(no host)'}: the dev stack only talks to a loopback address`
+    )
+  }
+}
+
+/** A connection string for one login on the dev Postgres; refuses a host that is not loopback. */
+export function databaseUrl(
+  role: Role,
+  secrets: Secrets,
+  ports: Ports,
+  host = '127.0.0.1'
+): string {
+  const url = `postgres://${role}:${secrets.passwords[role]}@${host}:${ports.postgres}/closeline`
+  assertLoopbackDatabaseUrl(url)
+  return url
+}
+
+/** The Docker variables that pick an endpoint; they go to the compose commands only. */
+const DOCKER_VARIABLES = ['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG'] as const
+
+/** Whether a Docker endpoint is a local unix socket. */
+export function isLocalDockerHost(host: string): boolean {
+  return host.startsWith('unix://')
+}
+
+/**
+ * A message if the Docker endpoint in effect is not a local unix socket, else undefined.
+ * `DOCKER_HOST` wins when set; otherwise `inspectContext` returns the host of the current
+ * context (`docker context inspect`).
+ */
+export async function dockerEndpointProblem(
+  parent: Record<string, string | undefined>,
+  inspectContext: () => Promise<string | undefined>
+): Promise<string | undefined> {
+  const host = parent.DOCKER_HOST ? parent.DOCKER_HOST : await inspectContext()
+  if (host === undefined || host === '') {
+    return 'cannot tell which Docker endpoint is in use (`docker context inspect` failed)'
+  }
+  return isLocalDockerHost(host)
+    ? undefined
+    : `the Docker endpoint (${host}) is not a local unix socket; the dev stack only runs on local Docker`
 }
 
 /** Variables a child process may inherit from this one; everything else is withheld. */
@@ -218,25 +314,41 @@ export function buildStackEnv(options: {
   ports: Ports
   secrets: Secrets
   dbDir: string
+  /** Where the database is reached; only a loopback address is accepted. */
+  databaseHost?: string
 }): StackEnv {
   const { parent, ports, secrets, dbDir } = options
+  const host = options.databaseHost ?? '127.0.0.1'
+  if (parent.DOCKER_HOST && !isLocalDockerHost(parent.DOCKER_HOST)) {
+    throw new Error(
+      `DOCKER_HOST (${parent.DOCKER_HOST}) is not a local unix socket; the dev stack only runs on local Docker`
+    )
+  }
+  const dockerEnv: Record<string, string> = {}
+  for (const name of DOCKER_VARIABLES) {
+    const value = parent[name]
+    if (value !== undefined) {
+      dockerEnv[name] = value
+    }
+  }
   const base = baseChildEnv(parent)
   const where = origins(ports)
   const common = { ENVIRONMENT: 'local', REGION: 'us', LOG_LEVEL: 'info', SHUTDOWN_GRACE_MS: '0' }
   return {
     compose: {
       ...base,
+      ...dockerEnv,
       CLOSELINE_DB_DIR: dbDir,
       CLOSELINE_DEV_POSTGRES_PORT: String(ports.postgres),
       CLOSELINE_DEV_QUEUE_PORT: String(ports.queue),
       CLOSELINE_DEV_STORAGE_PORT: String(ports.storage),
     },
-    migrate: { ...base, DATABASE_URL: databaseUrl('closeline_owner', secrets, ports) },
+    migrate: { ...base, DATABASE_URL: databaseUrl('closeline_owner', secrets, ports, host) },
     auth: {
       ...base,
       ...common,
       PORT: String(ports.auth),
-      DATABASE_URL: databaseUrl('closeline_auth', secrets, ports),
+      DATABASE_URL: databaseUrl('closeline_auth', secrets, ports, host),
       PUBLIC_URL: where.auth,
       TOKEN_AUDIENCE: 'closeline',
       CORE_BASE_URL: where.core,
@@ -246,7 +358,7 @@ export function buildStackEnv(options: {
       ...base,
       ...common,
       PORT: String(ports.core),
-      DATABASE_URL: databaseUrl('closeline_core', secrets, ports),
+      DATABASE_URL: databaseUrl('closeline_core', secrets, ports, host),
       AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
       AUTH_ISSUER: where.auth,
       AUTH_AUDIENCE: 'closeline',
@@ -579,4 +691,283 @@ export async function probeInternalWiring(options: {
     return { ok: false, reason: `core answered a wrong secret with ${bad.status}, not 401` }
   }
   return { ok: true }
+}
+
+/**
+ * The `docker compose` command line for the dev stack. Always names the `closeline-dev` project,
+ * so no command here can touch another project's containers or volumes, and reads no `.env`
+ * file (`--env-file /dev/null`), which compose would otherwise load from the hub.
+ */
+export function composeArgs(composeFile: string, ...args: string[]): string[] {
+  return [
+    'docker',
+    'compose',
+    '--env-file',
+    '/dev/null',
+    '-p',
+    COMPOSE_PROJECT,
+    '-f',
+    composeFile,
+    ...args,
+  ]
+}
+
+/** The command line of `--down`, with `--volumes` deleting the dev stack's data. */
+export function downArgs(composeFile: string, volumes: boolean): string[] {
+  return composeArgs(composeFile, 'down', '--remove-orphans', ...(volumes ? ['--volumes'] : []))
+}
+
+/**
+ * The db library's migration script, run as a file so that no nested `bun run` can load a stray
+ * `.env` from that clone. This is what its `db:migrate` script runs.
+ */
+export function migrateCommand(bun: string): string[] {
+  return [bun, '--no-env-file', 'scripts/migrate.ts']
+}
+
+/** Longest each kind of subprocess may run before it is killed, in ms. */
+export const TIMEOUTS = {
+  dockerQuick: 20_000,
+  psql: 60_000,
+  migrate: 180_000,
+  composeUp: 240_000,
+  composeDown: 120_000,
+} as const
+
+/** Reads a stream to its end through a line prefixer. */
+export async function pumpThrough(
+  stream: ReadableStream<Uint8Array>,
+  prefixer: LinePrefixer
+): Promise<void> {
+  const decoder = new TextDecoder()
+  for await (const chunk of stream) {
+    prefixer.push(decoder.decode(chunk, { stream: true }))
+  }
+  prefixer.push(decoder.decode())
+  prefixer.flush()
+}
+
+/** Where a process's output lines go. */
+export type Sinks = { out: (text: string) => void; err: (text: string) => void }
+
+const processSinks: Sinks = {
+  out: (text) => process.stdout.write(text),
+  err: (text) => process.stderr.write(text),
+}
+
+/** Options shared by the subprocess helpers. */
+export type SpawnOptions = {
+  cwd: string
+  env: Record<string, string>
+  /** Secret values removed from every output line of both streams. */
+  secrets: readonly string[]
+  stdin?: string
+  sinks?: Sinks
+}
+
+/**
+ * Runs a command to completion with its output prefixed and scrubbed of `secrets` on both streams.
+ * It is killed after `timeoutMs`. Resolves with the exit code and whether it timed out.
+ */
+export async function runCommand(
+  name: string,
+  cmd: string[],
+  options: SpawnOptions & { timeoutMs: number }
+): Promise<{ code: number; timedOut: boolean }> {
+  const sinks = options.sinks ?? processSinks
+  const proc = Bun.spawn({
+    cmd,
+    cwd: options.cwd,
+    env: options.env,
+    stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    proc.kill('SIGKILL')
+  }, options.timeoutMs)
+  try {
+    await Promise.all([
+      pumpThrough(proc.stdout, new LinePrefixer(name, sinks.out, options.secrets)),
+      pumpThrough(proc.stderr, new LinePrefixer(name, sinks.err, options.secrets)),
+    ])
+    return { code: await proc.exited, timedOut }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The stdout of a short command, or undefined if it failed or ran past `timeoutMs`. */
+export async function captureCommand(
+  cmd: string[],
+  options: { cwd: string; env: Record<string, string>; timeoutMs: number; stdin?: string }
+): Promise<string | undefined> {
+  const proc = Bun.spawn({
+    cmd,
+    cwd: options.cwd,
+    env: options.env,
+    stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
+    stdout: 'pipe',
+    stderr: 'ignore',
+  })
+  const timer = setTimeout(() => proc.kill('SIGKILL'), options.timeoutMs)
+  try {
+    const text = await new Response(proc.stdout).text()
+    return (await proc.exited) === 0 ? text : undefined
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** A long-running child the supervisor can stop. */
+export type ManagedChild = {
+  name: string
+  alive: () => boolean
+  kill: (signal: 'SIGTERM' | 'SIGKILL') => void
+  /** Resolves with the exit code once the process has exited and its output has drained. */
+  exited: Promise<number>
+}
+
+/** Starts a long-running child whose output is prefixed and scrubbed of `secrets` on both streams. */
+export function spawnManaged(name: string, cmd: string[], options: SpawnOptions): ManagedChild {
+  const sinks = options.sinks ?? processSinks
+  const proc = Bun.spawn({
+    cmd,
+    cwd: options.cwd,
+    env: options.env,
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  let alive = true
+  const exited = (async () => {
+    await Promise.all([
+      pumpThrough(proc.stdout, new LinePrefixer(name, sinks.out, options.secrets)),
+      pumpThrough(proc.stderr, new LinePrefixer(name, sinks.err, options.secrets)),
+    ])
+    const code = await proc.exited
+    alive = false
+    return code
+  })()
+  return { name, alive: () => alive, kill: (signal) => proc.kill(signal), exited }
+}
+
+/** Stops every child: SIGTERM, then SIGKILL for any still alive after `graceMs`. */
+export async function stopAll(children: readonly ManagedChild[], graceMs = 15_000): Promise<void> {
+  for (const child of children) {
+    if (child.alive()) {
+      child.kill('SIGTERM')
+    }
+  }
+  const timer = setTimeout(() => {
+    for (const child of children) {
+      if (child.alive()) {
+        child.kill('SIGKILL')
+      }
+    }
+  }, graceMs)
+  try {
+    await Promise.all(children.map((child) => child.exited))
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** The signals that stop the stack: Ctrl-C, a kill, and the terminal going away. */
+export const STOP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+
+/** One service for {@link supervise}. */
+export type ServiceSpec = { name: string; readyUrl: string; spawn: () => ManagedChild }
+
+/** Everything {@link supervise} needs, so it can be tested with fakes. */
+export type SuperviseOptions = {
+  services: readonly ServiceSpec[]
+  /** Checks the services are wired together once they are all ready. */
+  probe: () => Promise<WiringResult>
+  /** Resolves with a message, or undefined when `url` is ready; stops when `isAlive` is false. */
+  waitReady: (url: string, isAlive: () => boolean) => Promise<string | undefined>
+  /** Registers a signal handler; returns a function that removes it. */
+  subscribe: (onSignal: (signal: string) => void) => () => void
+  log: (line: string) => void
+  error: (line: string) => void
+  /** Called once everything is ready, before waiting. */
+  banner: () => void
+  graceMs?: number
+}
+
+/**
+ * Starts the services in order, waits for each, checks the wiring, then waits for a signal or for
+ * any service to exit. Every path out, including a throw, stops every child that was started.
+ * Returns 0 after a signal and 1 after any failure.
+ */
+export async function supervise(options: SuperviseOptions): Promise<number> {
+  const children: ManagedChild[] = []
+  let stopping = false
+  let exitCode = 0
+  let wake: () => void = () => {}
+  const woken = new Promise<void>((resolve) => {
+    wake = resolve
+  })
+  const stop = (code: number) => {
+    if (!stopping) {
+      stopping = true
+      exitCode = code
+      wake()
+    }
+  }
+  const unsubscribe = options.subscribe((signal) => {
+    if (!stopping) {
+      options.log(
+        `${signal}: stopping services (compose keeps running; \`bun run dev --down\` stops it)`
+      )
+    }
+    stop(0)
+  })
+  try {
+    for (const service of options.services) {
+      const child = service.spawn()
+      children.push(child)
+      void child.exited.then((code) => {
+        if (!stopping) {
+          options.error(`${service.name} exited with code ${code}`)
+          stop(1)
+        }
+      })
+      const failure = await options.waitReady(service.readyUrl, () => child.alive() && !stopping)
+      if (stopping) {
+        break
+      }
+      if (failure !== undefined) {
+        options.error(`${service.name} ${failure}`)
+        stop(1)
+        break
+      }
+      options.log(`${service.name} is ready`)
+    }
+    if (!stopping) {
+      const wiring = await options.probe()
+      if (!stopping) {
+        if (wiring.ok) {
+          options.log("wiring: core accepts auth's internal secret and refuses a wrong one")
+        } else {
+          options.error(`wiring: ${wiring.reason}`)
+          stop(1)
+        }
+      }
+    }
+    if (!stopping) {
+      options.banner()
+      await woken
+    }
+  } catch (error) {
+    options.error(error instanceof Error ? error.message : 'the supervisor failed')
+    exitCode = 1
+  } finally {
+    stopping = true
+    unsubscribe()
+    await stopAll(children, options.graceMs)
+  }
+  return exitCode
 }

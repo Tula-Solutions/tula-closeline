@@ -1,28 +1,39 @@
 // Runs the Closeline stack on this machine: `bun run dev`. See docs/local-development.md.
 //
-// Brings up the dev compose stack, waits for it, gives every database role a fresh password,
-// applies the migrations with tula-closeline-db's own script, then starts core, auth and the
-// portal from their sibling clones. Secrets live in this process and the children's environments
-// only: they are never written to a file and never printed.
+// Brings up the dev compose stack, waits for it, gives every database login role a fresh
+// password, applies the migrations with tula-closeline-db's own script, then starts core, auth and
+// the portal from their sibling clones. Secrets live in this process and the children's
+// environments only: they are never written to a file and never printed.
 import { dirname, join, resolve } from 'node:path'
 import {
   type Args,
+  assertLoopbackDatabaseUrl,
   buildStackEnv,
   busyPorts,
-  COMPOSE_PROJECT,
+  captureCommand,
   checkSiblings,
+  composeArgs,
+  dockerEndpointProblem,
+  downArgs,
   generateSecrets,
-  LinePrefixer,
+  LOGIN_ROLES_SQL,
+  migrateCommand,
   origins,
   type Ports,
   parseArgs,
   probeInternalWiring,
   resolvePorts,
   rotationSql,
+  runCommand,
   type Secrets,
+  STOP_SIGNALS,
   secretValues,
   serviceDefinitions,
   siblingDir,
+  spawnManaged,
+  supervise,
+  TIMEOUTS,
+  unrotatedLoginRoles,
   waitForReady,
 } from './dev-lib.ts'
 
@@ -44,62 +55,9 @@ function say(line: string): void {
   process.stdout.write(`[dev]      ${line}\n`)
 }
 
-/** Runs a command to completion, streaming its output with a prefix. Returns its exit code. */
-async function run(
-  name: string,
-  cmd: string[],
-  options: { cwd: string; env: Record<string, string>; stdin?: string; secrets: readonly string[] }
-): Promise<number> {
-  const proc = Bun.spawn({
-    cmd,
-    cwd: options.cwd,
-    env: options.env,
-    stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  await Promise.all([
-    pump(proc.stdout, new LinePrefixer(name, (l) => process.stdout.write(l), options.secrets)),
-    pump(proc.stderr, new LinePrefixer(name, (l) => process.stderr.write(l), options.secrets)),
-  ])
-  return proc.exited
-}
-
-/** Reads a stream to its end through a line prefixer. */
-async function pump(stream: ReadableStream<Uint8Array>, prefixer: LinePrefixer): Promise<void> {
-  const decoder = new TextDecoder()
-  for await (const chunk of stream) {
-    prefixer.push(decoder.decode(chunk, { stream: true }))
-  }
-  prefixer.push(decoder.decode())
-  prefixer.flush()
-}
-
-/** The output of a command that is expected to be short, or undefined if it failed. */
-async function capture(cmd: string[], env: Record<string, string>): Promise<string | undefined> {
-  const proc = Bun.spawn({ cmd, cwd: hub, env, stdout: 'pipe', stderr: 'ignore' })
-  const text = await new Response(proc.stdout).text()
-  return (await proc.exited) === 0 ? text : undefined
-}
-
-function compose(...args: string[]): string[] {
-  return ['docker', 'compose', '-p', COMPOSE_PROJECT, '-f', composeFile, ...args]
-}
-
-/** `--down`: stops the dev stack; with `--volumes` also deletes its data. */
-async function down(args: Extract<Args, { kind: 'down' }>, ports: Ports): Promise<number> {
-  const stack = buildStackEnv({
-    parent: process.env,
-    ports,
-    secrets: generateSecrets(),
-    dbDir: siblingDir(siblingsRoot(), 'db'),
-  })
-  const extra = args.volumes ? ['--volumes'] : []
-  return run('compose', compose('down', '--remove-orphans', ...extra), {
-    cwd: hub,
-    env: stack.compose,
-    secrets: [],
-  })
+/** Writes an error line of this script's own output. */
+function fail(line: string): void {
+  process.stderr.write(`[dev]      error: ${line}\n`)
 }
 
 function siblingsRoot(): string {
@@ -108,47 +66,82 @@ function siblingsRoot(): string {
     : dirname(hub)
 }
 
-/** A started service: its process and a promise of its exit code. */
-type Running = {
-  name: string
-  proc: Bun.Subprocess<'ignore', 'pipe', 'pipe'>
-  exited: Promise<number>
-  alive: () => boolean
+/** Runs one step to completion; on a non-zero exit or a timeout prints why and returns false. */
+async function step(
+  name: string,
+  cmd: string[],
+  options: Parameters<typeof runCommand>[2],
+  failure: string
+): Promise<boolean> {
+  const { code, timedOut } = await runCommand(name, cmd, options)
+  if (code === 0) {
+    return true
+  }
+  fail(timedOut ? `${failure} (timed out after ${options.timeoutMs / 1000} s)` : failure)
+  return false
 }
 
-/** Stops every child: SIGTERM, then SIGKILL after `graceMs`. */
-async function stopAll(children: Running[], graceMs = 15_000): Promise<void> {
-  for (const child of children) {
-    if (child.alive()) {
-      child.proc.kill('SIGTERM')
-    }
+/** Builds the stack environment, or prints why it cannot and returns undefined. */
+function stackEnv(ports: Ports, secrets: Secrets, root: string) {
+  try {
+    return buildStackEnv({ parent: process.env, ports, secrets, dbDir: siblingDir(root, 'db') })
+  } catch (error) {
+    fail(error instanceof Error ? error.message : 'could not build the environment')
+    return undefined
   }
-  const timer = setTimeout(() => {
-    for (const child of children) {
-      if (child.alive()) {
-        child.proc.kill('SIGKILL')
-      }
-    }
-  }, graceMs)
-  await Promise.all(children.map((child) => child.exited))
-  clearTimeout(timer)
+}
+
+/** `--down`: stops the dev stack; with `--volumes` also deletes its data. */
+async function down(args: Extract<Args, { kind: 'down' }>, ports: Ports): Promise<number> {
+  const stack = stackEnv(ports, generateSecrets(), siblingsRoot())
+  if (!stack) {
+    return 1
+  }
+  const ok = await step(
+    'compose',
+    downArgs(composeFile, args.volumes),
+    { cwd: hub, env: stack.compose, secrets: [], timeoutMs: TIMEOUTS.composeDown },
+    'docker compose down failed'
+  )
+  return ok ? 0 : 1
 }
 
 async function up(ports: Ports): Promise<number> {
   const root = siblingsRoot()
   const problems = checkSiblings(root)
 
-  const probeEnv = buildStackEnv({
-    parent: process.env,
-    ports,
-    secrets: generateSecrets(),
-    dbDir: siblingDir(root, 'db'),
-  })
-  if ((await capture(['docker', 'compose', 'version'], probeEnv.compose)) === undefined) {
+  const secrets: Secrets = generateSecrets()
+  const redactions = secretValues(secrets)
+  const stack = stackEnv(ports, secrets, root)
+  if (!stack) {
+    return 1
+  }
+  assertLoopbackDatabaseUrl(stack.migrate.DATABASE_URL ?? '')
+  const quick = { cwd: hub, env: stack.compose, timeoutMs: TIMEOUTS.dockerQuick }
+
+  if ((await captureCommand(['docker', 'compose', 'version'], quick)) === undefined) {
     problems.push('docker compose is not available: install Docker Desktop or the compose plugin')
+  } else {
+    const endpoint = await dockerEndpointProblem(process.env, async () =>
+      (
+        await captureCommand(
+          ['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'],
+          quick
+        )
+      )?.trim()
+    )
+    if (endpoint !== undefined) {
+      problems.push(endpoint)
+    }
+  }
+  if (problems.length > 0) {
+    for (const problem of problems) {
+      fail(problem)
+    }
+    return 1
   }
 
-  const already = await capture(compose('ps', '--status', 'running', '-q'), probeEnv.compose)
+  const already = await captureCommand(composeArgs(composeFile, 'ps', '-q'), quick)
   const stackRunning = (already ?? '').trim() !== ''
   const wanted = [
     { name: 'auth', port: ports.auth },
@@ -162,164 +155,129 @@ async function up(ports: Ports): Promise<number> {
           { name: 'object storage stand-in', port: ports.storage },
         ]),
   ]
-  problems.push(...(await busyPorts(wanted)))
-  if (problems.length > 0) {
-    for (const problem of problems) {
-      process.stderr.write(`[dev]      error: ${problem}\n`)
+  const busy = await busyPorts(wanted)
+  if (busy.length > 0) {
+    for (const problem of busy) {
+      fail(`${problem} (a service left running by a killed run? stop that process)`)
     }
     return 1
   }
-
-  const secrets: Secrets = generateSecrets()
-  const redactions = secretValues(secrets)
-  const stack = buildStackEnv({
-    parent: process.env,
-    ports,
-    secrets,
-    dbDir: siblingDir(root, 'db'),
-  })
 
   say('starting the compose stack (Postgres 18, queue and object storage stand-ins)')
-  const composeUp = await run('compose', compose('up', '-d', '--wait', '--wait-timeout', '180'), {
-    cwd: hub,
-    env: stack.compose,
-    secrets: redactions,
-  })
-  if (composeUp !== 0) {
-    process.stderr.write('[dev]      error: docker compose up failed\n')
+  if (
+    !(await step(
+      'compose',
+      composeArgs(composeFile, 'up', '-d', '--wait', '--wait-timeout', '180'),
+      { cwd: hub, env: stack.compose, secrets: redactions, timeoutMs: TIMEOUTS.composeUp },
+      'docker compose up failed'
+    ))
+  ) {
     return 1
   }
 
-  say('replacing every database role password with a new random one')
-  const rotated = await run(
-    'compose',
-    compose(
-      'exec',
-      '-T',
-      'postgres',
-      'psql',
-      '-U',
-      'postgres',
-      '-d',
-      'closeline',
-      '-v',
-      'ON_ERROR_STOP=1',
-      '-q'
-    ),
-    { cwd: hub, env: stack.compose, stdin: rotationSql(secrets), secrets: redactions }
+  const psql = composeArgs(
+    composeFile,
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-U',
+    'postgres',
+    '-d',
+    'closeline',
+    '-v',
+    'ON_ERROR_STOP=1',
+    '-q'
   )
-  if (rotated !== 0) {
-    process.stderr.write('[dev]      error: could not set the role passwords\n')
+  const logins = await captureCommand([...psql, '-At'], {
+    ...quick,
+    timeoutMs: TIMEOUTS.psql,
+    stdin: `${LOGIN_ROLES_SQL};\n`,
+  })
+  if (logins === undefined) {
+    fail('could not list the database login roles')
+    return 1
+  }
+  const unknown = unrotatedLoginRoles(logins)
+  if (unknown.length > 0) {
+    fail(
+      `the database has login role(s) this script does not give a new password: ${unknown.join(', ')}. ` +
+        'Add them to ROLES in scripts/dev-lib.ts. Continuing would leave a known password valid.'
+    )
     return 1
   }
 
-  say("applying migrations with tula-closeline-db's db:migrate")
-  const migrated = await run('migrate', [process.execPath, '--no-env-file', 'run', 'db:migrate'], {
-    cwd: siblingDir(root, 'db'),
-    env: stack.migrate,
-    secrets: redactions,
-  })
-  if (migrated !== 0) {
-    process.stderr.write('[dev]      error: db:migrate failed\n')
+  say('replacing every database login role password with a new random one')
+  if (
+    !(await step(
+      'compose',
+      psql,
+      {
+        cwd: hub,
+        env: stack.compose,
+        stdin: rotationSql(secrets),
+        secrets: redactions,
+        timeoutMs: TIMEOUTS.psql,
+      },
+      'could not set the role passwords'
+    ))
+  ) {
     return 1
   }
 
-  const children: Running[] = []
-  let shuttingDown = false
-  let exitCode = 0
-  let wake: () => void = () => {}
-  const woken = new Promise<void>((resolveWoken) => {
-    wake = resolveWoken
+  say("applying migrations with tula-closeline-db's migrate script")
+  if (
+    !(await step(
+      'migrate',
+      migrateCommand(process.execPath),
+      {
+        cwd: siblingDir(root, 'db'),
+        env: stack.migrate,
+        secrets: redactions,
+        timeoutMs: TIMEOUTS.migrate,
+      },
+      'db migrate failed'
+    ))
+  ) {
+    return 1
+  }
+
+  const where = origins(ports)
+  return supervise({
+    services: serviceDefinitions(process.execPath, ports).map((definition) => ({
+      name: definition.name,
+      readyUrl: definition.readyUrl,
+      spawn: () =>
+        spawnManaged(definition.name, definition.cmd, {
+          cwd: siblingDir(root, definition.sibling),
+          env: stack[definition.env],
+          secrets: redactions,
+        }),
+    })),
+    probe: () => probeInternalWiring({ coreOrigin: where.core, token: secrets.internalToken }),
+    waitReady: (url, isAlive) => waitForReady(url, { timeoutMs: 90_000, isAlive }),
+    subscribe: (onSignal) => {
+      for (const signal of STOP_SIGNALS) {
+        process.on(signal, onSignal)
+      }
+      return () => {
+        for (const signal of STOP_SIGNALS) {
+          process.off(signal, onSignal)
+        }
+      }
+    },
+    log: say,
+    error: fail,
+    banner: () => {
+      say(`auth    ${where.auth}`)
+      say(`core    ${where.core}`)
+      say(`portal  ${where.portal}`)
+      say(
+        `Postgres 127.0.0.1:${ports.postgres}, queue :${ports.queue}, object storage :${ports.storage}`
+      )
+      say('running; Ctrl-C stops the services')
+    },
   })
-
-  const begin = (signal: string) => {
-    if (!shuttingDown) {
-      shuttingDown = true
-      say(`${signal}: stopping services (compose keeps running; \`bun run dev --down\` stops it)`)
-      wake()
-    }
-  }
-  process.on('SIGINT', () => begin('SIGINT'))
-  process.on('SIGTERM', () => begin('SIGTERM'))
-
-  for (const definition of serviceDefinitions(process.execPath, ports)) {
-    const stdoutPrefixer = new LinePrefixer(
-      definition.name,
-      (l) => process.stdout.write(l),
-      redactions
-    )
-    const stderrPrefixer = new LinePrefixer(
-      definition.name,
-      (l) => process.stderr.write(l),
-      redactions
-    )
-    const proc = Bun.spawn({
-      cmd: definition.cmd,
-      cwd: siblingDir(root, definition.sibling),
-      env: stack[definition.env],
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    let alive = true
-    const exited = (async () => {
-      await Promise.all([pump(proc.stdout, stdoutPrefixer), pump(proc.stderr, stderrPrefixer)])
-      const code = await proc.exited
-      alive = false
-      if (!shuttingDown) {
-        process.stderr.write(`[dev]      error: ${definition.name} exited with code ${code}\n`)
-        exitCode = 1
-        shuttingDown = true
-        wake()
-      }
-      return code
-    })()
-    children.push({ name: definition.name, proc, exited, alive: () => alive })
-
-    const failure = await waitForReady(definition.readyUrl, {
-      timeoutMs: 90_000,
-      isAlive: () => alive && !shuttingDown,
-    })
-    if (failure !== undefined) {
-      if (!shuttingDown) {
-        process.stderr.write(`[dev]      error: ${definition.name} ${failure}\n`)
-        exitCode = 1
-        shuttingDown = true
-      }
-      break
-    }
-    say(`${definition.name} is ready`)
-  }
-
-  if (!shuttingDown) {
-    const where = origins(ports)
-    const wiring = await probeInternalWiring({
-      coreOrigin: where.core,
-      token: secrets.internalToken,
-    })
-    if (wiring.ok) {
-      say("wiring: core accepts auth's internal secret and refuses a wrong one")
-    } else {
-      process.stderr.write(`[dev]      error: wiring: ${wiring.reason}\n`)
-      exitCode = 1
-      shuttingDown = true
-    }
-  }
-
-  if (!shuttingDown) {
-    const where = origins(ports)
-    say(`auth    ${where.auth}`)
-    say(`core    ${where.core}`)
-    say(`portal  ${where.portal}`)
-    say(
-      `Postgres 127.0.0.1:${ports.postgres}, queue :${ports.queue}, object storage :${ports.storage}`
-    )
-    say('running; Ctrl-C stops the services')
-    await woken
-  }
-
-  await stopAll(children)
-  return exitCode
 }
 
 if (import.meta.main) {
@@ -336,9 +294,7 @@ if (import.meta.main) {
   try {
     ports = resolvePorts(process.env)
   } catch (error) {
-    process.stderr.write(
-      `[dev]      error: ${error instanceof Error ? error.message : 'bad ports'}\n`
-    )
+    fail(error instanceof Error ? error.message : 'bad ports')
     process.exit(2)
   }
   const code = args.kind === 'down' ? await down(args, ports) : await up(ports)
