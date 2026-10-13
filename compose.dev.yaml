@@ -52,6 +52,10 @@ services:
     ports: ['127.0.0.1:${CLOSELINE_DEV_QUEUE_PORT:-9324}:9324']
     volumes:
       - ./scripts/dev/elasticmq.conf:/opt/elasticmq.conf:ro
+    # The image declares VOLUME /data. Without this compose makes an anonymous volume that
+    # `down --volumes` of this project cannot name. The queues are rebuilt on every start anyway.
+    tmpfs:
+      - /data
     healthcheck:
       test: ['CMD-SHELL', 'wget -q -O /dev/null "http://127.0.0.1:9324/?Action=ListQueues" || exit 1']
       interval: 3s
@@ -84,6 +88,9 @@ services:
   # when the container stops.
   mail:
     image: axllent/mailpit:v1.31.5@sha256:94f6b70c1436defae6799d9ac7ff0eeff9540465b842026d5cdb018f1c0234ea
+    # Mailpit checks for a newer release on start; this stack makes no outbound call.
+    environment:
+      MP_DISABLE_VERSION_CHECK: '1'
     ports: ['127.0.0.1:${CLOSELINE_DEV_MAIL_PORT:-8026}:8025']
     healthcheck:
       test: ['CMD', '/mailpit', 'readyz']

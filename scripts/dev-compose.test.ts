@@ -11,6 +11,7 @@ type Service = {
   environment?: Record<string, string>
   ports?: string[]
   volumes?: string[]
+  tmpfs?: string[]
   healthcheck?: { test: string[] }
 }
 const compose = Bun.YAML.parse(text) as { name: string; services: Record<string, Service> }
@@ -95,5 +96,23 @@ describe('compose.dev.yaml', () => {
     expect(mail?.volumes ?? []).toEqual([])
     expect(mail?.environment?.MP_DATABASE).toBeUndefined()
     expect(mail?.healthcheck?.test.join(' ')).toContain('readyz')
+  })
+
+  test('the mailbox makes no outbound call: its version check is off', () => {
+    expect(String(compose.services.mail?.environment?.MP_DISABLE_VERSION_CHECK)).toBe('1')
+  })
+
+  test('the queue stand-in mounts its declared /data, so --down --volumes leaves no anonymous volume', () => {
+    const queue = compose.services.queue
+    const named = (queue?.volumes ?? []).some((volume) => volume.endsWith(':/data'))
+    const memory = (queue?.tmpfs ?? []).includes('/data')
+    expect(named || memory).toBe(true)
+    // A named volume must be one that `down --volumes` removes: declared at the top level.
+    for (const volume of queue?.volumes ?? []) {
+      const [source] = volume.split(':')
+      if (source && !source.startsWith('.') && !source.startsWith('/')) {
+        expect(text).toMatch(new RegExp(`^  ${source}:`, 'm'))
+      }
+    }
   })
 })

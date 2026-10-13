@@ -64,7 +64,11 @@ describe('the real effects wired in dev.ts', () => {
     }
     const quiet: string[] = []
     deps.fail = (line) => quiet.push(line)
-    const context = createContext({ PATH: '/usr/bin', DOCKER_HOST: 'tcp://x:2375' }, DEFAULT_PORTS)
+    // PATH is a directory with nothing in it, so even a broken guard could not reach a real docker.
+    const context = createContext(
+      { PATH: mkdtempSync(join(tmpdir(), 'closeline-empty-')), DOCKER_HOST: 'tcp://x:2375' },
+      DEFAULT_PORTS
+    )
     expect(await runDown(context, deps, true)).toBe(1)
     expect(spawned).toEqual([])
     expect(quiet.join('\n')).toContain('not a local unix socket')
@@ -85,7 +89,15 @@ function standInDocker() {
   return { bin, log }
 }
 
+/**
+ * Runs scripts/dev.ts in a child whose PATH is only the given directories, which must all be
+ * temporary ones made by this file: a real `docker` can never be found, whatever the stand-in does.
+ * Bun itself is started by its absolute path.
+ */
 function runDev(args: string[], env: Record<string, string>) {
+  for (const entry of (env.PATH ?? '').split(':')) {
+    expect(resolve(entry).startsWith(resolve(tmpdir()))).toBe(true)
+  }
   const proc = Bun.spawnSync([process.execPath, '--no-env-file', 'scripts/dev.ts', ...args], {
     cwd: hub,
     env,
@@ -97,7 +109,7 @@ function runDev(args: string[], env: Record<string, string>) {
 describe('scripts/dev.ts as a program', () => {
   test('--down with DOCKER_HOST=tcp://x exits 1 and runs no docker at all', () => {
     const { bin, log } = standInDocker()
-    const result = runDev(['--down'], { PATH: `${bin}:/usr/bin:/bin`, DOCKER_HOST: 'tcp://x:2375' })
+    const result = runDev(['--down'], { PATH: bin, DOCKER_HOST: 'tcp://x:2375' })
     expect(result.code).toBe(1)
     expect(existsSync(log)).toBe(false)
     expect(result.err).toContain('not a local unix socket')
@@ -105,7 +117,7 @@ describe('scripts/dev.ts as a program', () => {
 
   test('--down --volumes on a local socket checks the context first, then downs closeline-dev only', () => {
     const { bin, log } = standInDocker()
-    const result = runDev(['--down', '--volumes'], { PATH: `${bin}:/usr/bin:/bin` })
+    const result = runDev(['--down', '--volumes'], { PATH: bin })
     expect(result.code).toBe(0)
     const calls = readFileSync(log, 'utf8').trim().split('\n')
     expect(calls[0]).toStartWith('context inspect')
@@ -117,7 +129,7 @@ describe('scripts/dev.ts as a program', () => {
 
   test('with no docker on PATH it says so plainly, with no stack trace', () => {
     const empty = mkdtempSync(join(tmpdir(), 'closeline-nodocker-'))
-    for (const args of [['--down'], []]) {
+    for (const args of [['--down'], ['--down', '--volumes'], []]) {
       const result = runDev(args, { PATH: empty })
       expect(result.code).toBe(1)
       expect(result.err).toContain('Docker installed and on PATH')
@@ -125,8 +137,23 @@ describe('scripts/dev.ts as a program', () => {
     }
   })
 
+  test('a stand-in docker that cannot be run is "not available", and nothing else runs', () => {
+    const { bin, log } = standInDocker()
+    chmodSync(join(bin, 'docker'), 0o644)
+    for (const args of [['--down', '--volumes'], []]) {
+      const result = runDev(args, { PATH: bin })
+      expect(result.code).toBe(1)
+      expect(result.err).toContain('Docker installed and on PATH')
+      expect(existsSync(log)).toBe(false)
+    }
+  })
+
+  test('the helper refuses a PATH that reaches outside the stand-in directories', () => {
+    expect(() => runDev(['--down'], { PATH: `${standInDocker().bin}:/usr/bin` })).toThrow()
+  })
+
   test('an unknown flag exits 2 with the usage', () => {
-    const result = runDev(['--wipe'], { PATH: '/usr/bin:/bin' })
+    const result = runDev(['--wipe'], { PATH: mkdtempSync(join(tmpdir(), 'closeline-empty-')) })
     expect(result.code).toBe(2)
     expect(result.err).toContain('usage: bun run dev')
   })

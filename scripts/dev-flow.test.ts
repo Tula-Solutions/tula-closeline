@@ -39,6 +39,8 @@ function harness(
     runCode?: (name: string, cmd: string[]) => number
     superviseCode?: number
     mailFailure?: string
+    /** Compose services that already have a running container. */
+    running?: string[]
     secrets?: typeof secrets
   } = {}
 ) {
@@ -64,6 +66,12 @@ function harness(
         return 'logins' in options
           ? options.logins
           : 'closeline_auth\ncloseline_core\ncloseline_owner\ncloseline_playbook\npostgres\n'
+      }
+      if (cmd.includes('ps')) {
+        const service = cmd.at(-1) ?? ''
+        const up =
+          service === '-q' ? (options.running?.length ?? 0) > 0 : options.running?.includes(service)
+        return up ? 'abc123\n' : ''
       }
       return ''
     },
@@ -157,9 +165,13 @@ describe('runUp order', () => {
     const h = harness()
     expect(await runUp(h.context, h.deps)).toBe(0)
     const steps = h.calls.map(stepName)
-    expect(steps.slice(0, 8)).toEqual([
+    // One `ps` per compose service (postgres, queue, storage, mail): see the ports tests below.
+    expect(steps.slice(0, 11)).toEqual([
       'context',
       'version',
+      'ps',
+      'ps',
+      'ps',
       'ps',
       'up',
       'logins',
@@ -585,5 +597,47 @@ describe('the mailbox', () => {
     expect(h.busyAsked).toContainEqual({ name: 'mailbox', port: 8099 })
     expect(h.waited[0]).toBe('http://127.0.0.1:8099/livez')
     expect(h.said.join('\n')).toContain('http://127.0.0.1:8099')
+  })
+})
+
+describe('ports of a stack that is partly up', () => {
+  const every = ['postgres', 'queue', 'storage', 'mail']
+
+  test('a stack from an older run with no mail container still has the mailbox port checked', async () => {
+    const h = harness({
+      running: ['postgres', 'queue', 'storage'],
+      busy: [
+        'port 8026 (mailbox) is already in use; stop what uses it or set its CLOSELINE_DEV_*_PORT',
+      ],
+    })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.busyAsked.map((wanted) => wanted.name)).toContain('mailbox')
+    expect(h.failed.join('\n')).toContain('port 8026 (mailbox) is already in use')
+    expect(h.calls.some((call) => call.cmd.includes('up'))).toBe(false)
+  })
+
+  test('only the containers that are not running have their port checked', async () => {
+    const h = harness({ running: ['postgres', 'queue', 'storage'] })
+    await runUp(h.context, h.deps)
+    const asked = h.busyAsked.map((wanted) => wanted.name)
+    expect(asked).toContain('mailbox')
+    expect(asked).not.toContain('Postgres')
+    expect(asked).not.toContain('queue stand-in')
+    expect(asked).not.toContain('object storage stand-in')
+  })
+
+  test('a stack that is fully up has no compose port checked, only the three services', async () => {
+    const h = harness({ running: every })
+    await runUp(h.context, h.deps)
+    expect(h.busyAsked.map((wanted) => wanted.name).sort()).toEqual(['auth', 'core', 'portal'])
+  })
+
+  test('a clean start checks all four compose ports', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    const asked = h.busyAsked.map((wanted) => wanted.name)
+    for (const name of ['Postgres', 'queue stand-in', 'object storage stand-in', 'mailbox']) {
+      expect(asked).toContain(name)
+    }
   })
 })

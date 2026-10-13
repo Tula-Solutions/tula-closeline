@@ -203,20 +203,30 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       return failed()
     }
 
-    const already = await deps.capture(composeArgs(ctx.composeFile, 'ps', '-q'), quick)
     const { ports } = ctx
+    // A compose container that is already running holds its own port; one that is not running
+    // (a stack from an older version of this file, or one that was stopped) will need its port.
+    const stackParts = [
+      { service: 'postgres', name: 'Postgres', port: ports.postgres },
+      { service: 'queue', name: 'queue stand-in', port: ports.queue },
+      { service: 'storage', name: 'object storage stand-in', port: ports.storage },
+      { service: 'mail', name: 'mailbox', port: ports.mail },
+    ]
+    const notRunning: { name: string; port: number }[] = []
+    for (const part of stackParts) {
+      const running = await deps.capture(
+        composeArgs(ctx.composeFile, 'ps', '-q', part.service),
+        quick
+      )
+      if ((running ?? '').trim() === '') {
+        notRunning.push({ name: part.name, port: part.port })
+      }
+    }
     const wanted = [
       { name: 'auth', port: ports.auth },
       { name: 'core', port: ports.core },
       { name: 'portal', port: ports.portal },
-      ...((already ?? '').trim() !== ''
-        ? []
-        : [
-            { name: 'Postgres', port: ports.postgres },
-            { name: 'queue stand-in', port: ports.queue },
-            { name: 'object storage stand-in', port: ports.storage },
-            { name: 'mailbox', port: ports.mail },
-          ]),
+      ...notRunning,
     ]
     const busy = await deps.busy(wanted)
     if (busy.length > 0 || stopped()) {
