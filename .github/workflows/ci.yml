@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [develop, main]
@@ -11,5 +12,5 @@ concurrency:
 
 jobs:
   verify:
-    uses: ./.github/workflows/verify.yml
+    uses: Tula-Solutions/tula-closeline/.github/workflows/verify.yml@develop
     secrets: inherit
