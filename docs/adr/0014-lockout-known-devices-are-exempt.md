@@ -1,0 +1,33 @@
+# ADR 0014 — Lockout: known devices are exempt
+
+**Status:** Accepted
+**Date:** 2026-10-13
+**Builds on:** ADR 0005, ADR 0007
+
+## Context
+
+The auth service (ADR 0005, copied from tula-auth) locks sign-in for an address after repeated wrong passwords, and checks the lockout before it verifies the password. Anyone can therefore keep a victim locked out: about 11 wrong passwords for the victim's address, then one every 15 minutes. The weakness is inherited from tula-auth.
+
+The lockout and per-address rate-limit counters are also held in process memory. That multiplies the guessing budget by the number of instances, resets it on every deploy or crash, and breaks the rule that state lives in Postgres, the queue or the cache (hub issue 30, from the round 1 review of auth#1).
+
+## Decision
+
+1. **Lockout stays keyed by address for unknown devices.** An address with too many wrong passwords is locked against devices that have not signed in to it before.
+2. **A known device is not locked out by other people's wrong guesses.** A device that has signed in successfully to that account before carries a signed cookie. Sign-in from it is not refused because of lockout counted against the address.
+3. **Lockout and rate-limit state lives in Postgres**, not process memory, keyed by a hash of the address and never the address itself. Instances share it, so the budget no longer depends on how many run or when they last restarted.
+4. **The known-device cookie is set by auth's session work** (ADR 0012), on a successful sign-in.
+
+The format and lifetime of the cookie, and the limits that still apply to a known device (for example a rate limit on wrong passwords from that device), are left to the implementing ticket.
+
+## Considered options
+
+- **Keying lockout on address plus device.** Rejected: an attacker who sends no cookie, or a fresh one each time, gets a fresh budget for every attempt, so the guessing limit stops limiting guessing.
+- **Accepting the risk and documenting it.** Rejected: it leaves anyone able to lock a named person out of the product indefinitely at the cost of one request every 15 minutes.
+
+## Consequences
+
+- A person on a device they have used before keeps being able to sign in while someone else guesses at their address. A person on a new device is still locked out by that guessing until it stops.
+- A known device that is stolen, or whose cookie is copied, is not slowed by the address lockout. The limits that still apply to it matter for that reason and are for the ticket to set.
+- The cookie must be signed, so a device cannot claim to be known by writing its own, and tied to the account it was earned on, so it exempts the device from nothing else.
+- Moving the counters to Postgres needs a migration in the `auth` schema in `tula-closeline-db`, and Postgres adapters for auth's lockout and rate-limiter ports. Auth's "one instance only" deployment constraint is removed once they land.
+- Rows expire and are purged in bounded batches, so the table does not grow with the number of addresses ever seen.
