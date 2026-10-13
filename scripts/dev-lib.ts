@@ -19,6 +19,7 @@ export type Ports = {
   postgres: number
   queue: number
   storage: number
+  mail: number
   auth: number
   core: number
   portal: number
@@ -29,6 +30,7 @@ export const DEFAULT_PORTS: Ports = {
   postgres: 5440,
   queue: 9324,
   storage: 9090,
+  mail: 8026,
   auth: 3001,
   core: 3100,
   portal: 3002,
@@ -38,6 +40,7 @@ const PORT_VARIABLES: Record<keyof Ports, string> = {
   postgres: 'CLOSELINE_DEV_POSTGRES_PORT',
   queue: 'CLOSELINE_DEV_QUEUE_PORT',
   storage: 'CLOSELINE_DEV_STORAGE_PORT',
+  mail: 'CLOSELINE_DEV_MAIL_PORT',
   auth: 'CLOSELINE_DEV_AUTH_PORT',
   core: 'CLOSELINE_DEV_CORE_PORT',
   portal: 'CLOSELINE_DEV_PORTAL_PORT',
@@ -242,7 +245,7 @@ export async function dockerEndpointProblem(
 ): Promise<string | undefined> {
   const host = parent.DOCKER_HOST ? parent.DOCKER_HOST : await inspectContext()
   if (host === undefined || host === '') {
-    return 'cannot tell which Docker endpoint is in use (`docker context inspect` failed)'
+    return 'cannot tell which Docker endpoint is in use: `docker context inspect` failed (is Docker installed and on PATH?)'
   }
   return isLocalDockerHost(host)
     ? undefined
@@ -286,8 +289,14 @@ export function baseChildEnv(parent: Record<string, string | undefined>): Record
 }
 
 /** The origins the services are reached at, from the host. */
-export function origins(ports: Ports): { auth: string; core: string; portal: string } {
+export function origins(ports: Ports): {
+  auth: string
+  core: string
+  portal: string
+  mail: string
+} {
   return {
+    mail: `http://127.0.0.1:${ports.mail}`,
     auth: `http://127.0.0.1:${ports.auth}`,
     core: `http://127.0.0.1:${ports.core}`,
     portal: `http://127.0.0.1:${ports.portal}`,
@@ -347,6 +356,7 @@ export function buildStackEnv(options: {
       CLOSELINE_DEV_POSTGRES_PORT: String(ports.postgres),
       CLOSELINE_DEV_QUEUE_PORT: String(ports.queue),
       CLOSELINE_DEV_STORAGE_PORT: String(ports.storage),
+      CLOSELINE_DEV_MAIL_PORT: String(ports.mail),
     },
     migrate: { ...base, DATABASE_URL: databaseUrl('closeline_owner', secrets, ports, host) },
     auth: {
@@ -358,6 +368,7 @@ export function buildStackEnv(options: {
       TOKEN_AUDIENCE: 'closeline',
       CORE_BASE_URL: where.core,
       CORE_INTERNAL_TOKEN: secrets.internalToken,
+      MAIL_LOCAL_URL: where.mail,
     },
     core: {
       ...base,
@@ -369,6 +380,7 @@ export function buildStackEnv(options: {
       AUTH_AUDIENCE: 'closeline',
       INTERNAL_API_TOKENS: secrets.internalToken,
       PORTAL_BASE_URL: where.portal,
+      MAIL_LOCAL_URL: where.mail,
     },
     portal: {
       ...base,
@@ -770,6 +782,26 @@ export type SpawnOptions = {
   sinks?: Sinks
   /** Aborting it stops the process (SIGTERM). */
   signal?: AbortSignal
+  /** Aborting it kills the process (SIGKILL), for one that ignored the first signal. */
+  force?: AbortSignal
+}
+
+/** Wires the two abort signals of a process: SIGTERM on `signal`, SIGKILL on `force`. */
+function linkAbort(
+  proc: { kill: (signal: 'SIGTERM' | 'SIGKILL') => void },
+  options: { signal?: AbortSignal; force?: AbortSignal }
+): () => void {
+  const term = () => proc.kill('SIGTERM')
+  const kill = () => proc.kill('SIGKILL')
+  options.signal?.addEventListener('abort', term, { once: true })
+  options.force?.addEventListener('abort', kill, { once: true })
+  if (options.force?.aborted) {
+    kill()
+  }
+  return () => {
+    options.signal?.removeEventListener('abort', term)
+    options.force?.removeEventListener('abort', kill)
+  }
 }
 
 /**
@@ -785,21 +817,26 @@ export async function runCommand(
   if (options.signal?.aborted) {
     return { code: 143, timedOut: false }
   }
-  const proc = Bun.spawn({
-    cmd,
-    cwd: options.cwd,
-    env: options.env,
-    stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
+  let proc: Bun.Subprocess<'ignore' | Uint8Array, 'pipe', 'pipe'>
+  try {
+    proc = Bun.spawn({
+      cmd,
+      cwd: options.cwd,
+      env: options.env,
+      stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+  } catch {
+    sinks.err(`[${name}] cannot run ${cmd[0] ?? 'the command'}: is it installed and on PATH?\n`)
+    return { code: 127, timedOut: false }
+  }
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
     proc.kill('SIGKILL')
   }, options.timeoutMs)
-  const onAbort = () => proc.kill('SIGTERM')
-  options.signal?.addEventListener('abort', onAbort, { once: true })
+  const unlink = linkAbort(proc, options)
   try {
     await Promise.all([
       pumpThrough(proc.stdout, new LinePrefixer(name, sinks.out, options.secrets)),
@@ -808,7 +845,7 @@ export async function runCommand(
     return { code: await proc.exited, timedOut }
   } finally {
     clearTimeout(timer)
-    options.signal?.removeEventListener('abort', onAbort)
+    unlink()
   }
 }
 
@@ -821,28 +858,33 @@ export async function captureCommand(
     timeoutMs: number
     stdin?: string
     signal?: AbortSignal
+    force?: AbortSignal
   }
 ): Promise<string | undefined> {
   if (options.signal?.aborted) {
     return undefined
   }
-  const proc = Bun.spawn({
-    cmd,
-    cwd: options.cwd,
-    env: options.env,
-    stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
-    stdout: 'pipe',
-    stderr: 'ignore',
-  })
+  let proc: Bun.Subprocess<'ignore' | Uint8Array, 'pipe', 'ignore'>
+  try {
+    proc = Bun.spawn({
+      cmd,
+      cwd: options.cwd,
+      env: options.env,
+      stdin: options.stdin === undefined ? 'ignore' : new TextEncoder().encode(options.stdin),
+      stdout: 'pipe',
+      stderr: 'ignore',
+    })
+  } catch {
+    return undefined
+  }
   const timer = setTimeout(() => proc.kill('SIGKILL'), options.timeoutMs)
-  const onAbort = () => proc.kill('SIGTERM')
-  options.signal?.addEventListener('abort', onAbort, { once: true })
+  const unlink = linkAbort(proc, options)
   try {
     const text = await new Response(proc.stdout).text()
     return (await proc.exited) === 0 ? text : undefined
   } finally {
     clearTimeout(timer)
-    options.signal?.removeEventListener('abort', onAbort)
+    unlink()
   }
 }
 
@@ -858,14 +900,21 @@ export type ManagedChild = {
 /** Starts a long-running child whose output is prefixed and scrubbed of `secrets` on both streams. */
 export function spawnManaged(name: string, cmd: string[], options: SpawnOptions): ManagedChild {
   const sinks = options.sinks ?? processSinks
-  const proc = Bun.spawn({
-    cmd,
-    cwd: options.cwd,
-    env: options.env,
-    stdin: 'ignore',
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
+  let proc: Bun.Subprocess<'ignore', 'pipe', 'pipe'>
+  try {
+    proc = Bun.spawn({
+      cmd,
+      cwd: options.cwd,
+      env: options.env,
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+  } catch {
+    throw new Error(
+      `cannot start ${name} (${cmd[0] ?? 'the command'}): is it installed and on PATH?`
+    )
+  }
   let alive = true
   const exited = (async () => {
     await Promise.all([

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { type FlowDeps, runDown, runUp } from './dev-flow.ts'
+import { type FlowDeps, INTERRUPTED, runDown, runUp } from './dev-flow.ts'
 import {
   buildStackEnv,
   captureCommand,
@@ -38,13 +38,16 @@ function harness(
     buildEnv?: FlowDeps['buildEnv']
     runCode?: (name: string, cmd: string[]) => number
     superviseCode?: number
+    mailFailure?: string
     secrets?: typeof secrets
   } = {}
 ) {
   const calls: Call[] = []
   const said: string[] = []
   const failed: string[] = []
-  let handler: (signal: string) => void = () => {}
+  const live = new Set<(signal: string) => void>()
+  const waited: string[] = []
+  const busyAsked: { name: string; port: number }[] = []
   let supervised = false
   const label = (cmd: string[]) => cmd.slice(0, 3).join(' ')
   const deps: FlowDeps = {
@@ -79,19 +82,28 @@ function harness(
       for (const service of o.services) {
         service.spawn()
       }
+      o.banner()
       return options.superviseCode ?? 0
     },
-    busy: async () => options.busy ?? [],
+    busy: async (wanted) => {
+      busyAsked.push(...wanted)
+      return options.busy ?? []
+    },
     siblingProblems: () => options.siblingProblems ?? [],
     buildEnv: options.buildEnv ?? buildStackEnv,
     secrets: options.secrets ?? secrets,
     salt: freshSalt,
     subscribe: (onSignal) => {
-      handler = onSignal
-      return () => {}
+      live.add(onSignal)
+      return () => {
+        live.delete(onSignal)
+      }
     },
     probe: async () => ({ ok: true }),
-    waitReady: async () => undefined,
+    waitReady: async (url) => {
+      waited.push(url)
+      return options.mailFailure
+    },
     say: (line) => said.push(line),
     fail: (line) => failed.push(line),
   }
@@ -109,7 +121,15 @@ function harness(
     failed,
     deps,
     context,
-    signal: (s = 'SIGINT') => handler(s),
+    /** Like the process emitting a signal: every handler that is registered right now gets it. */
+    signal: (name = 'SIGINT') => {
+      for (const handler of [...live]) {
+        handler(name)
+      }
+    },
+    liveHandlers: () => live.size,
+    waited,
+    busyAsked,
     supervised: () => supervised,
   }
 }
@@ -331,7 +351,9 @@ describe('signals during start-up', () => {
         }
         const code = await runUp(h.context, h.deps)
         expect(seen).toBe(1)
-        expect(code).not.toBe(0)
+        expect(code).toBe(INTERRUPTED)
+        expect(INTERRUPTED).toBe(130)
+        expect(h.liveHandlers()).toBe(0)
         expect(h.failed).toEqual([])
         expect(h.supervised()).toBe(false)
         expect(h.calls.some((call) => call.kind === 'spawn')).toBe(false)
@@ -352,7 +374,8 @@ describe('signals during start-up', () => {
       }
       return result
     }
-    expect(await runUp(h.context, h.deps)).not.toBe(0)
+    expect(await runUp(h.context, h.deps)).toBe(INTERRUPTED)
+    expect(h.liveHandlers()).toBe(0)
     expect(rotationCalls(h.calls)).toHaveLength(0)
     expect(h.supervised()).toBe(false)
   })
@@ -363,12 +386,14 @@ describe('signals during start-up', () => {
       const off = o.subscribe((signal) => {
         h.said.push(`got ${signal}`)
       })
+      expect(h.liveHandlers()).toBe(1)
       h.signal('SIGHUP')
       off()
       return 0
     }
     expect(await runUp(h.context, h.deps)).toBe(0)
     expect(h.said).toContain('got SIGHUP')
+    expect(h.liveHandlers()).toBe(0)
   })
 })
 
@@ -420,5 +445,145 @@ describe('package scripts', () => {
   test('dev and dev:smoke load no .env file', () => {
     expect(scripts.dev).toContain('--no-env-file')
     expect(scripts['dev:smoke']).toContain('--no-env-file')
+  })
+})
+
+describe('signals during start-up: a second one kills, none misleads', () => {
+  /** A fake run that ignores the first signal, like a process that traps SIGTERM. */
+  function stubborn(h: ReturnType<typeof harness>) {
+    const original = h.deps.run
+    const seen = { term: 0, kill: 0 }
+    h.deps.run = async (name, cmd, opts) => {
+      if (!cmd.includes('up')) {
+        return original(name, cmd, opts)
+      }
+      opts.signal?.addEventListener('abort', () => seen.term++, { once: true })
+      return new Promise((resolve) => {
+        opts.force?.addEventListener(
+          'abort',
+          () => {
+            seen.kill++
+            resolve({ code: 137, timedOut: false })
+          },
+          { once: true }
+        )
+        setTimeout(() => resolve({ code: 0, timedOut: false }), 5_000)
+      })
+    }
+    return seen
+  }
+
+  test('one signal asks politely and a second kills a step that ignored the first', async () => {
+    const h = harness()
+    const seen = stubborn(h)
+    const started = Date.now()
+    const result = runUp(h.context, h.deps)
+    await Bun.sleep(20)
+    h.signal('SIGTERM')
+    await Bun.sleep(40)
+    expect(seen).toEqual({ term: 1, kill: 0 })
+    h.signal('SIGTERM')
+    expect(await result).toBe(INTERRUPTED)
+    expect(seen.kill).toBe(1)
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(h.said.join('\n')).toContain('again: killing')
+    expect(h.liveHandlers()).toBe(0)
+    expect(h.supervised()).toBe(false)
+  })
+
+  test('a third signal does nothing more', async () => {
+    const h = harness()
+    const seen = stubborn(h)
+    const result = runUp(h.context, h.deps)
+    await Bun.sleep(20)
+    h.signal('SIGINT')
+    h.signal('SIGINT')
+    h.signal('SIGINT')
+    expect(await result).toBe(INTERRUPTED)
+    expect(seen).toEqual({ term: 1, kill: 1 })
+    expect(h.said.filter((line) => line.includes('killing'))).toHaveLength(1)
+  })
+
+  test.each([
+    ['docker context inspect', (cmd: string[]) => cmd[1] === 'context'],
+    ['docker compose version', (cmd: string[]) => cmd.at(-1) === 'version'],
+  ])(
+    'a signal during %s prints no complaint about Docker and exits 130',
+    async (_label, during) => {
+      const h = harness()
+      const original = h.deps.capture
+      h.deps.capture = async (cmd, opts) => {
+        if (during(cmd)) {
+          h.signal('SIGINT')
+          return undefined
+        }
+        return original(cmd, opts)
+      }
+      expect(await runUp(h.context, h.deps)).toBe(INTERRUPTED)
+      expect(h.failed).toEqual([])
+      expect(h.calls.some((call) => call.cmd.includes('up'))).toBe(false)
+    }
+  )
+
+  test('a signal during --down checks prints no complaint and exits 130', async () => {
+    const h = harness()
+    const original = h.deps.capture
+    h.deps.capture = async (cmd, opts) => {
+      if (cmd[1] === 'context') {
+        h.signal('SIGTERM')
+        return undefined
+      }
+      return original(cmd, opts)
+    }
+    expect(await runDown(h.context, h.deps, true)).toBe(INTERRUPTED)
+    expect(h.failed).toEqual([])
+    expect(h.calls.some((call) => call.cmd.includes('down'))).toBe(false)
+  })
+
+  test('signals during shutdown go to the supervisor and print no start-up message', async () => {
+    const h = harness()
+    h.deps.supervise = async (o: SuperviseOptions) => {
+      const off = o.subscribe(() => {})
+      h.signal('SIGINT')
+      off()
+      h.signal('SIGINT')
+      h.signal('SIGHUP')
+      return 0
+    }
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    expect(h.said.join('\n')).not.toMatch(/step in progress|killing/)
+    expect(h.liveHandlers()).toBe(0)
+  })
+})
+
+describe('the mailbox', () => {
+  test('is port-checked with the others and waited for before the roles are touched', async () => {
+    const h = harness()
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    expect(h.busyAsked).toContainEqual({ name: 'mailbox', port: 8026 })
+    expect(h.waited[0]).toBe('http://127.0.0.1:8026/livez')
+  })
+
+  test('a mailbox that never answers stops the start before any role or service', async () => {
+    const h = harness({ mailFailure: 'did not answer 2xx' })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.failed.join('\n')).toContain('mailbox did not answer')
+    expect(h.calls.some((call) => call.stdin?.includes('rolcanlogin'))).toBe(false)
+    expect(h.supervised()).toBe(false)
+  })
+
+  test('its address is printed so a person can read the mail in a browser', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    expect(h.said.join('\n')).toContain('mailbox http://127.0.0.1:8026')
+  })
+
+  test('a moved mailbox port is the one that is checked, waited for and printed', async () => {
+    const h = harness()
+    h.context.ports = { ...DEFAULT_PORTS, mail: 8099 }
+    await runUp(h.context, h.deps)
+    expect(h.busyAsked).toContainEqual({ name: 'mailbox', port: 8099 })
+    expect(h.waited[0]).toBe('http://127.0.0.1:8099/livez')
+    expect(h.said.join('\n')).toContain('http://127.0.0.1:8099')
   })
 })

@@ -44,7 +44,7 @@ export type FlowDeps = {
   run: (
     name: string,
     cmd: string[],
-    options: SpawnOptions & { timeoutMs: number; signal?: AbortSignal }
+    options: SpawnOptions & { timeoutMs: number }
   ) => ReturnType<typeof runCommand>
   capture: (
     cmd: string[],
@@ -54,6 +54,7 @@ export type FlowDeps = {
       timeoutMs: number
       stdin?: string
       signal?: AbortSignal
+      force?: AbortSignal
     }
   ) => ReturnType<typeof captureCommand>
   spawn: (name: string, cmd: string[], options: SpawnOptions) => ManagedChild
@@ -71,14 +72,14 @@ export type FlowDeps = {
 }
 
 /** The exit code after a signal stopped the start-up. */
-const INTERRUPTED = 130
+export const INTERRUPTED = 130
 
 /**
  * Builds the environment and applies the two guards, before any Docker or database command:
  * the database address must be loopback, and the Docker endpoint in effect (the variable or the
  * current context) must be a unix socket. Prints why and returns undefined if either fails.
  */
-async function prepare(ctx: FlowContext, deps: FlowDeps, signal: AbortSignal) {
+async function prepare(ctx: FlowContext, deps: FlowDeps, abort: Abort) {
   let stack: StackEnv
   try {
     stack = deps.buildEnv({
@@ -94,7 +95,7 @@ async function prepare(ctx: FlowContext, deps: FlowDeps, signal: AbortSignal) {
     deps.fail(error instanceof Error ? error.message : 'could not build the environment')
     return undefined
   }
-  const quick = { cwd: ctx.hub, env: stack.compose, timeoutMs: TIMEOUTS.dockerQuick, signal }
+  const quick = { cwd: ctx.hub, env: stack.compose, timeoutMs: TIMEOUTS.dockerQuick, ...abort }
   const endpoint = await dockerEndpointProblem(ctx.parentEnv, async () =>
     (
       await deps.capture(
@@ -104,31 +105,43 @@ async function prepare(ctx: FlowContext, deps: FlowDeps, signal: AbortSignal) {
     )?.trim()
   )
   if (endpoint !== undefined) {
-    deps.fail(endpoint)
+    // A signal that cut the check short is not a problem with Docker: say nothing.
+    if (!abort.signal.aborted) {
+      deps.fail(endpoint)
+    }
     return undefined
   }
   return { stack, quick }
 }
 
-/** Handles stop signals for the whole run: aborts the active subprocess until the services run. */
+/** The two abort signals every subprocess step gets: stop it (SIGTERM), then kill it (SIGKILL). */
+type Abort = { signal: AbortSignal; force: AbortSignal }
+
+/**
+ * Handles stop signals for the whole run. The first aborts the active subprocess, a second kills
+ * one that ignored it. Once the services run, signals go to the supervisor, and stay with it
+ * through shutdown: nothing after the hand-over prints a start-up message.
+ */
 function interrupts(deps: FlowDeps) {
-  const controller = new AbortController()
+  const stop = new AbortController()
+  const kill = new AbortController()
   let forward: ((signal: string) => void) | undefined
   const off = deps.subscribe((signal) => {
     if (forward) {
       forward(signal)
-    } else if (!controller.signal.aborted) {
+    } else if (!stop.signal.aborted) {
       deps.say(`${signal}: stopping the step in progress`)
-      controller.abort()
+      stop.abort()
+    } else if (!kill.signal.aborted) {
+      deps.say(`${signal} again: killing the step in progress`)
+      kill.abort()
     }
   })
   return {
-    signal: controller.signal,
+    abort: { signal: stop.signal, force: kill.signal } satisfies Abort,
     handOver: (handler: (signal: string) => void) => {
       forward = handler
-      return () => {
-        forward = undefined
-      }
+      return () => {}
     },
     off,
   }
@@ -138,21 +151,24 @@ function interrupts(deps: FlowDeps) {
 export async function runDown(ctx: FlowContext, deps: FlowDeps, volumes: boolean): Promise<number> {
   const interrupt = interrupts(deps)
   try {
-    const ready = await prepare(ctx, deps, interrupt.signal)
-    if (!ready || interrupt.signal.aborted) {
-      return interrupt.signal.aborted ? INTERRUPTED : 1
+    const ready = await prepare(ctx, deps, interrupt.abort)
+    if (!ready || interrupt.abort.signal.aborted) {
+      return interrupt.abort.signal.aborted ? INTERRUPTED : 1
     }
     const { code, timedOut } = await deps.run('compose', downArgs(ctx.composeFile, volumes), {
       cwd: ctx.hub,
       env: ready.stack.compose,
       secrets: [],
       timeoutMs: TIMEOUTS.composeDown,
-      signal: interrupt.signal,
+      ...interrupt.abort,
     })
+    if (interrupt.abort.signal.aborted) {
+      return INTERRUPTED
+    }
     if (code !== 0) {
       deps.fail(timedOut ? 'docker compose down timed out' : 'docker compose down failed')
     }
-    return code === 0 ? 0 : interrupt.signal.aborted ? INTERRUPTED : 1
+    return code === 0 ? 0 : 1
   } finally {
     interrupt.off()
   }
@@ -161,11 +177,11 @@ export async function runDown(ctx: FlowContext, deps: FlowDeps, volumes: boolean
 /** `bun run dev`: the whole start-up in order, then the supervised services. */
 export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
   const interrupt = interrupts(deps)
-  const { signal } = interrupt
-  const stopped = () => signal.aborted
+  const { abort } = interrupt
+  const stopped = () => abort.signal.aborted
   const failed = () => (stopped() ? INTERRUPTED : 1)
   try {
-    const ready = await prepare(ctx, deps, signal)
+    const ready = await prepare(ctx, deps, abort)
     if (!ready || stopped()) {
       return failed()
     }
@@ -173,10 +189,14 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
     const redactions = secretValues(deps.secrets)
 
     const problems = deps.siblingProblems(ctx.root)
-    if ((await deps.capture(['docker', 'compose', 'version'], quick)) === undefined) {
+    const hasCompose = (await deps.capture(['docker', 'compose', 'version'], quick)) !== undefined
+    if (stopped()) {
+      return failed()
+    }
+    if (!hasCompose) {
       problems.push('docker compose is not available: install Docker Desktop or the compose plugin')
     }
-    if (problems.length > 0 || stopped()) {
+    if (problems.length > 0) {
       for (const problem of problems) {
         deps.fail(problem)
       }
@@ -195,6 +215,7 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
             { name: 'Postgres', port: ports.postgres },
             { name: 'queue stand-in', port: ports.queue },
             { name: 'object storage stand-in', port: ports.storage },
+            { name: 'mailbox', port: ports.mail },
           ]),
     ]
     const busy = await deps.busy(wanted)
@@ -215,7 +236,7 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       const { code, timedOut } = await deps.run(name, cmd, {
         ...options,
         secrets: redactions,
-        signal,
+        ...abort,
       })
       if (stopped()) {
         return false
@@ -227,7 +248,7 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       return true
     }
 
-    deps.say('starting the compose stack (Postgres 18, queue and object storage stand-ins)')
+    deps.say('starting the compose stack (Postgres 18, queue, object storage and mailbox)')
     if (
       !(await step(
         'compose',
@@ -237,6 +258,16 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       ))
     ) {
       return failed()
+    }
+
+    const mailbox = `${origins(ctx.ports).mail}/livez`
+    const mailFailure = await deps.waitReady(mailbox, () => !stopped())
+    if (stopped()) {
+      return failed()
+    }
+    if (mailFailure !== undefined) {
+      deps.fail(`mailbox ${mailFailure}`)
+      return 1
     }
 
     const psql = composeArgs(
@@ -324,6 +355,9 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
         deps.say(`auth    ${where.auth}`)
         deps.say(`core    ${where.core}`)
         deps.say(`portal  ${where.portal}`)
+        deps.say(
+          `mailbox ${where.mail}  (Mailpit: read the sign-up codes and Invitation emails here)`
+        )
         deps.say(
           `Postgres 127.0.0.1:${ports.postgres}, queue :${ports.queue}, object storage :${ports.storage}`
         )

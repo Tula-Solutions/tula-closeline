@@ -46,7 +46,7 @@ describe('compose.dev.yaml', () => {
 
   test('binds every published port to 127.0.0.1', () => {
     const published = services.flatMap(([, service]) => service.ports ?? [])
-    expect(published).toHaveLength(3)
+    expect(published).toHaveLength(4)
     for (const port of published) {
       expect(port).toStartWith('127.0.0.1:')
     }
@@ -56,14 +56,15 @@ describe('compose.dev.yaml', () => {
     expect(text).toContain(`:-${DEFAULT_PORTS.postgres}}:5432`)
     expect(text).toContain(`:-${DEFAULT_PORTS.queue}}:9324`)
     expect(text).toContain(`:-${DEFAULT_PORTS.storage}}:9090`)
+    expect(text).toContain(`:-${DEFAULT_PORTS.mail}}:8025`)
   })
 
   test('pins every image by exact tag and digest, never latest', () => {
-    expect(services).toHaveLength(3)
+    expect(services).toHaveLength(4)
     for (const [, service] of services) {
       expect(service.image).toMatch(/^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$/)
       expect(service.image).not.toContain('latest')
-      expect(service.image).toMatch(/:\d+\.\d+/)
+      expect(service.image).toMatch(/:v?\d+\.\d+/)
     }
     expect(text).not.toMatch(/:latest\b/)
   })
@@ -82,5 +83,17 @@ describe('compose.dev.yaml', () => {
 
   test('states the minimum Docker Compose version', () => {
     expect(text).toContain('Docker Compose 2.17.0')
+  })
+
+  test('the mailbox is Mailpit v1.31.5, publishes only its HTTP port and keeps nothing on disk', () => {
+    const mail = compose.services.mail
+    expect(mail?.image).toStartWith('axllent/mailpit:v1.31.5@sha256:')
+    expect(mail?.ports).toHaveLength(1)
+    expect(mail?.ports?.[0]).toMatch(/^127\.0\.0\.1:\$\{CLOSELINE_DEV_MAIL_PORT:-8026\}:8025$/)
+    const all = JSON.stringify(mail)
+    expect(all).not.toContain('1025')
+    expect(mail?.volumes ?? []).toEqual([])
+    expect(mail?.environment?.MP_DATABASE).toBeUndefined()
+    expect(mail?.healthcheck?.test.join(' ')).toContain('readyz')
   })
 })

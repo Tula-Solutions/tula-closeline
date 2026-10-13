@@ -8,6 +8,7 @@ import {
   baseChildEnv,
   buildStackEnv,
   busyPorts,
+  captureCommand,
   checkSiblings,
   composeArgs,
   DEFAULT_PORTS,
@@ -19,6 +20,7 @@ import {
   LinePrefixer,
   LOGIN_ROLES_SQL,
   migrateCommand,
+  origins,
   parseArgs,
   probeInternalWiring,
   ROLES,
@@ -27,9 +29,11 @@ import {
   requestWithRetry,
   resolvePorts,
   rotationSql,
+  runCommand,
   scramVerifier,
   secretValues,
   serviceDefinitions,
+  spawnManaged,
   unrotatedLoginRoles,
   waitForReady,
 } from './dev-lib.ts'
@@ -653,5 +657,122 @@ describe('probeInternalWiring', () => {
     const result = await probeInternalWiring({ coreOrigin: origin, token: randomHex(32) })
     server.stop(true)
     expect(result).toEqual({ ok: false, reason: 'core answered a wrong secret with 200, not 401' })
+  })
+})
+
+describe('the local mailbox settings', () => {
+  const secrets = generateSecrets()
+  const build = (ports = DEFAULT_PORTS) =>
+    buildStackEnv({ parent: {}, ports, secrets, dbDir: '/db' })
+
+  test('the mailbox is on 8026 by default, which the other Mailpit on 8025 does not use', () => {
+    expect(DEFAULT_PORTS.mail).toBe(8026)
+    expect(resolvePorts({ CLOSELINE_DEV_MAIL_PORT: '8100' }).mail).toBe(8100)
+    expect(() => resolvePorts({ CLOSELINE_DEV_MAIL_PORT: 'x' })).toThrow('CLOSELINE_DEV_MAIL_PORT')
+    expect(() => resolvePorts({ CLOSELINE_DEV_MAIL_PORT: '3001' })).toThrow('both 3001')
+  })
+
+  test('auth and core get the one mailbox address, in the exact form their schemas accept', () => {
+    const env = build()
+    for (const service of [env.auth, env.core]) {
+      expect(service.MAIL_LOCAL_URL).toBe('http://127.0.0.1:8026')
+      expect(service.MAIL_LOCAL_URL).toMatch(/^http:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/)
+      expect(service.ENVIRONMENT).toBe('local')
+    }
+    expect(build({ ...DEFAULT_PORTS, mail: 8099 }).auth.MAIL_LOCAL_URL).toBe(
+      'http://127.0.0.1:8099'
+    )
+  })
+
+  test('nothing else gets the mailbox address, and no sender is invented', () => {
+    const env = build()
+    for (const other of [env.portal, env.migrate]) {
+      expect(JSON.stringify(other)).not.toContain('MAIL_')
+    }
+    expect(env.auth.MAIL_LOCAL_FROM).toBeUndefined()
+    expect(env.core.MAIL_LOCAL_FROM).toBeUndefined()
+    expect(env.compose.CLOSELINE_DEV_MAIL_PORT).toBe('8026')
+    expect(origins(DEFAULT_PORTS).mail).toBe('http://127.0.0.1:8026')
+  })
+})
+
+describe('a program that is not installed', () => {
+  const gone = ['/definitely/not/installed/docker', 'version']
+  const quiet = { out: () => {}, err: () => {} }
+
+  test('captureCommand answers undefined and runCommand 127, with a message and no throw', async () => {
+    expect(await captureCommand(gone, { cwd: '/', env: {}, timeoutMs: 1_000 })).toBeUndefined()
+    const lines: string[] = []
+    const result = await runCommand('compose', gone, {
+      cwd: '/',
+      env: {},
+      secrets: [],
+      timeoutMs: 1_000,
+      sinks: { out: () => {}, err: (text) => lines.push(text) },
+    })
+    expect(result.code).toBe(127)
+    expect(lines.join('')).toContain('is it installed and on PATH')
+  })
+
+  test('spawnManaged throws a plain message, not a stack trace from Bun', () => {
+    expect(() =>
+      spawnManaged('auth', gone, { cwd: '/', env: {}, secrets: [], sinks: quiet })
+    ).toThrow('cannot start auth')
+  })
+
+  test('the Docker check says what to do about it', async () => {
+    const problem = await dockerEndpointProblem({}, async () => undefined)
+    expect(problem).toContain('Docker installed and on PATH')
+  })
+})
+
+describe('force-killing a process that ignored SIGTERM', () => {
+  const stubborn = [
+    process.execPath,
+    '-e',
+    "process.on('SIGTERM', () => {}); console.log('ready'); await Bun.sleep(30000)",
+  ]
+
+  test('runCommand ends it on the force signal, long before its timeout', async () => {
+    const stop = new AbortController()
+    const force = new AbortController()
+    const started = Date.now()
+    const lines: string[] = []
+    const running = runCommand('step', stubborn, {
+      cwd: '/',
+      env: {},
+      secrets: [],
+      timeoutMs: 60_000,
+      signal: stop.signal,
+      force: force.signal,
+      sinks: { out: (text) => lines.push(text), err: () => {} },
+    })
+    while (!lines.join('').includes('ready') && Date.now() - started < 10_000) {
+      await Bun.sleep(20)
+    }
+    stop.abort()
+    await Bun.sleep(300)
+    expect(Date.now() - started).toBeLessThan(10_000)
+    force.abort()
+    const result = await running
+    expect(result.code).not.toBe(0)
+    expect(Date.now() - started).toBeLessThan(15_000)
+  })
+
+  test('captureCommand does the same', async () => {
+    const stop = new AbortController()
+    const force = new AbortController()
+    const started = Date.now()
+    setTimeout(() => stop.abort(), 400)
+    setTimeout(() => force.abort(), 900)
+    const out = await captureCommand(stubborn, {
+      cwd: '/',
+      env: {},
+      timeoutMs: 60_000,
+      signal: stop.signal,
+      force: force.signal,
+    })
+    expect(out).toBeUndefined()
+    expect(Date.now() - started).toBeLessThan(15_000)
   })
 })
