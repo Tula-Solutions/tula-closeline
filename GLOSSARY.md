@@ -76,12 +76,12 @@ A file an Organization uploaded to its Playbook, such as a sales deck or product
 _Avoid_: Asset, knowledge article, attachment
 
 **Call**:
-A conversation between a Prospect and a Rep or an Agent, live or uploaded from the Organization's past.
-_Avoid_: Meeting, session, conversation
+A spoken exchange between a Prospect and a Rep or an Agent, live or uploaded from the Organization's past; not a text exchange.
+_Avoid_: Meeting, session
 
 **Recording**:
-The audio of a Call.
-_Avoid_: Audio file, voice file
+The audio file of a Call, kept by the Organization; not the announcement that a Call is recorded.
+_Avoid_: Voice file, audio clip
 
 **Transcript**:
 The written turns of a Call, each attributed to one speaker.
@@ -93,8 +93,8 @@ _Avoid_: Opportunity, lead, order
 
 **Outcome**:
 Whether a Deal was won, lost or is still open.
-_Avoid_: Result, status, disposition
+_Avoid_: Result, disposition, status (of a Deal)
 
 **Moment**:
-A short window of consecutive turns in a Call, kept with its Deal's Outcome so search can find similar ones.
-_Avoid_: Snippet, segment, chunk, clip
+A short window of consecutive turns in a Call, kept with its Deal's Outcome so search can find similar ones. A piece of a Document is a chunk, not a Moment.
+_Avoid_: Snippet, segment, clip

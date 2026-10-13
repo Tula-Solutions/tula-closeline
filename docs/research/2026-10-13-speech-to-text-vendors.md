@@ -11,7 +11,7 @@ The job: Organizations upload past sales calls (two or more speakers, 10 to 90 m
 **Use AssemblyAI Universal-3.5 Pro with standard diarization, on the EU endpoint where the Organization needs it. Cost: $0.23 per audio hour.**
 
 - It is $0.21 plus $0.02 for diarization. The EU endpoint costs the same as the US one [A1].
-- It has the best diarization number in the only cross-vendor test I found. That test is AssemblyAI's own, so treat it as a vendor claim [A5].
+- It leads in the only cross-vendor diarization test I found, which is AssemblyAI's own. Its two tables give different numbers for the same models, so treat it as a vendor claim [A4].
 - It is not the cheapest. Deepgram on the Growth plan is about $0.216 per hour with diarization included. The gap is about $1,400 a month at 100,000 hours. I judge the accuracy lead worth that, but nothing independent proves it. Run the bake-off in section 6 before signing a commitment.
 
 **Runner-up: Deepgram Nova-3 monolingual.** It is $0.258 per hour pay-as-you-go and $0.216 on Growth (from $4,000 a year). Diarization is included for pre-recorded audio. It has an EU endpoint, SOC 2 Type 2, and a 2 GB file limit [D1][D2]. It is the safer pick if cost matters more than the accuracy gap once we measure it. It also serves phase 2 streaming.
@@ -30,7 +30,7 @@ All prices are USD per audio hour for batch (pre-recorded) audio, English.
 
 | Vendor and model | Base price | Diarization | Word timestamps | Languages | Max file | Async shape | EU region | Retention and training | Compliance | Streaming for phase 2 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| **AssemblyAI** Universal-3.5 Pro | $0.21; Universal-2 $0.15 [A1] | +$0.02 standard, +$0.065 experimental [A1] | Yes (unverified on the pricing page; standard in their API) | 99 languages on one price [A4] | Not found (unverified) | Submit job, then webhook or poll; accepts a URL | Yes, `api.eu.assemblyai.com`, same price [A1] | Async data kept until deleted or a TTL (minimum 1 hour); delete endpoint exists; removal can lag hours to days. Training opt-out exists [A2] | SOC 2 Type 1 and 2 [A2]. DPA, ISO and HIPAA unverified | Yes. Streaming diarization +$0.12 [A1] |
+| **AssemblyAI** Universal-3.5 Pro | $0.21; Universal-2 $0.15 [A1] | +$0.02 standard, +$0.065 experimental [A1] | Yes (unverified on the pricing page; standard in their API) | 99 languages on one price [A3] | Not found (unverified) | Submit job, then webhook or poll; accepts a URL | Yes, `api.eu.assemblyai.com`, same price [A1] | Async data kept until deleted or a TTL (minimum 1 hour); delete endpoint exists; removal can lag hours to days. Training opt-out exists [A2] | SOC 2 Type 1 and 2 [A2]. DPA, ISO and HIPAA unverified | Yes. Streaming diarization +$0.12 [A1] |
 | **Deepgram** Nova-3 monolingual | $0.258 PAYG ($0.0043/min); $0.216 Growth [D1] | Included, no charge for pre-recorded [D1] | Yes (unverified on the pricing page; standard) | Multilingual $0.312 PAYG, $0.258 Growth [D1] | 2 GB (secondary reading of Deepgram docs) [D3] | Callback URL, or a sync request that returns 504 after 10 minutes [D3] | Yes, `api.eu.deepgram.com` [D2] | Retention periods and training default not on the page I read; there is a `mip_opt_out` parameter [D2]. Ask in writing | SOC 2 Type 1 and 2 [D2]. DPA exists; general DPA unverified | Yes. Nova-3 $0.0077/min list; diarization $0.002/min extra [D1][D4] |
 | **OpenAI** gpt-4o-transcribe-diarize | About $0.36 ($0.006/min estimate; token-billed) [O1] | In the model | Not confirmed. Segment times yes; word times unverified | Many; diarize model language list unverified | 25 MB typical API limit (unverified), so 10 to 90 minute calls need chunking | Synchronous request; no native job or webhook for audio files (unverified) | Unverified | Unverified | Unverified | Realtime API exists; diarization in streaming unverified |
 | **Amazon Transcribe** | $1.44 first 250,000 min/month; tiers down to $0.47 (secondary) [AW1][AW2] | Included [AW1] | Yes | 100+ (unverified) | 4 hours or 2 GB (secondary) [AW3] | Start job from an S3 URI; EventBridge; 100 concurrent jobs by default, queue up to 10,000 [AW3] | Yes, many AWS regions, runs in our account | Output to our S3; AWS data terms | SOC 2, ISO, HIPAA, GDPR DPA via AWS (unverified in detail) | Yes, streaming at the same per-minute rate (secondary) [AW2] |
@@ -46,8 +46,8 @@ Mistral Voxtral Transcribe and Cohere were in my brief as possible newer entrant
 
 Nobody published an independent, cross-vendor test of diarized two-speaker sales-call audio. These are all I found:
 
-- **AssemblyAI's own async speaker-attributed error rate (cpWER):** Universal-3.5 Pro 35.21%, Deepgram 43.21%, Speechmatics 46.11%, Google 57.14%. AssemblyAI's own second table gives different numbers for the same models (Universal-3.5 Pro 30.17%, Deepgram Nova-3 37.92%, Scribe v2 35.26%). Both tables are vendor claims and they disagree with each other [A5].
-- **AssemblyAI's own async word error rate:** Universal-3.5 Pro 7.69%, Scribe v2 8.77%, Nova-3 multilingual 12.22%. Vendor claim [A5].
+- **AssemblyAI's own async speaker-attributed error rate (cpWER):** Universal-3.5 Pro 35.21%, Deepgram 43.21%, Speechmatics 46.11%, Google 57.14%. AssemblyAI's own second table gives different numbers for the same models (Universal-3.5 Pro 30.17%, Deepgram Nova-3 37.92%, Scribe v2 35.26%). Both tables are vendor claims and they disagree with each other [A4].
+- **AssemblyAI's own async word error rate:** Universal-3.5 Pro 7.69%, Scribe v2 8.77%, Nova-3 multilingual 12.22%. Vendor claim [A4].
 - **Deepgram's own claim:** Nova-3 at 5.26% WER on its own real-world set. Vendor claim [D4].
 - **Independent context:** an analysis of three commercial systems reported 16.5 to 19.2% WER on real contact-centre calls, and 10.2 to 11.6% on Switchboard. Two careful human transcribers disagree by 4.1 to 4.5% on telephone speech, so small gaps between vendors are inside the noise [K1] (secondary).
 - Whisper large-v3 and pyannote figures on our kind of audio: none found.
@@ -56,7 +56,7 @@ Nobody published an independent, cross-vendor test of diarized two-speaker sales
 
 **AssemblyAI.** Priced per audio hour, billed on audio submitted. The pricing page shows no volume tiers, only enterprise concurrency [A1]. Stereo files bill per channel in the earlier ingestion report, so send mono or merge channels (unverified here). Per-language diarization support and the maximum file length need confirming.
 
-**Deepgram.** Whisper Large is also offered at $0.0048/min [D1]. Flux is streaming only [D1]. The Growth plan saves up to 20% and needs a commitment from $4,000 a year [D1]. For long calls use the callback, not a held connection [D3].
+**Deepgram.** Whisper Large is also offered at $0.0048/min [D1]. Flux is streaming only [D1]. The Growth plan saves about 16% ($0.258 to $0.216) and needs a commitment from $4,000 a year [D1]. For long calls use the callback, not a held connection [D3].
 
 **OpenAI.** The pricing page gave an estimate of $0.006 per minute for the diarize model, but secondary sources say it bills tokens ($2.50 per million in, $10 per million out), so real cost per hour could differ [O1][O2]. It fits our async-job shape poorly. I would not choose it for batch.
 
@@ -64,9 +64,9 @@ Nobody published an independent, cross-vendor test of diarized two-speaker sales
 
 **Google Cloud.** Cheapest managed rate on paper, but I could not read the official price table (the fetch returned no content). The dynamic-batch rate, the batch diarization coverage, and the Chirp 3 limits are all unverified [G1].
 
-**ElevenLabs.** Competitive price with diarization included, and one secondary source places Scribe v2 close to the leaders [A5]. The blocker is EU processing, which I could not confirm [E3]. Keyterm prompting costs $0.05 extra per hour [E1].
+**ElevenLabs.** Competitive price with diarization included, and one secondary source places Scribe v2 close to the leaders [A4]. The blocker is EU processing, which I could not confirm [E3]. Keyterm prompting costs $0.05 extra per hour [E1].
 
-**Speechmatics.** The official page shows Melia 1 at $0.24, which conflicts with a usage tracker's $0.129 and $0.40 figures. I used the official page [S1]. Its pay-as-you-go tier has no volume discount; subscriptions give up to 25% off. It is strong on EU hosting but weaker on measured diarization in the one test I have [A5].
+**Speechmatics.** The official page shows Melia 1 at $0.24, which conflicts with a usage tracker's $0.129 and $0.40 figures. I used the official page [S1]. Its pay-as-you-go tier has no volume discount; subscriptions give up to 25% off. It is strong on EU hosting but weaker on measured diarization in the one test I have [A4].
 
 **Gladia.** Cheapest at the Growth rate if the $0.20 holds, but every figure is secondary or a vendor blog. Worth one quote request, not a decision.
 
@@ -87,7 +87,7 @@ Assumes all calls are English, mono, with diarization, and billed on audio hours
 | Google Chirp 3 dynamic batch (unverified) | $0.18 | $180 | $1,800 | $18,000 |
 | Amazon Transcribe (tiers from secondary sources) | $1.44 falling to $0.47 | $1,440 | $11,250 | $65,850 |
 | Gladia Starter (secondary) | $0.61 | $610 | $6,100 | $61,000 |
-| Self-hosted GPU (section 5) | $0.08 to $0.25 compute | $80 to $250 plus fixed costs | $800 to $2,500 plus fixed costs | $8,000 to $25,000 plus fixed costs |
+| Self-hosted GPU (section 5) | $0.09 to $0.31 compute | $90 to $310 plus fixed costs | $900 to $3,100 plus fixed costs | $9,000 to $31,000 plus fixed costs |
 
 How the Amazon figures were worked: 1,000 hours is 60,000 minutes at $0.024. 10,000 hours is 600,000 minutes: 250,000 at $0.024 plus 350,000 at $0.015. 100,000 hours is 6 million minutes: 250,000 at $0.024, 750,000 at $0.015, 4 million at $0.0102 and 1 million at $0.0078.
 
@@ -101,9 +101,9 @@ Read the table this way: at 100,000 hours a month, the managed options that matt
 
 **Throughput.** I found no AWS-specific benchmark. Community numbers for large-v3 run from about 12x real time on an RTX 3090 to about 19x on an A5000 [W2], and the same sources disagree on memory (5 to 6 GB versus 16 to 20 GB) [W2]. The estimate below is mine, not measured:
 
-- Assume 15x to 40x real time for the full pipeline on an L40S once diarization and alignment are included.
+- Assume 15x to 40x real time for the full pipeline on an L40S once diarization and alignment are included. This is above the 12x to 19x I found, which were for Whisper large-v3 alone on consumer or workstation GPUs, so it is optimistic and unmeasured.
 - That is $1.86 divided by 15 to 40, so $0.05 to $0.12 per audio hour at full use.
-- Real queues are not full. At 40 to 50% utilisation it is $0.10 to $0.25 per audio hour.
+- Real queues are not full. At 40 to 50% utilisation it is $0.09 to $0.31 per audio hour ($0.05 divided by 0.5, to $0.12 divided by 0.4).
 - Spot instances on g6 could cut that by half, with interruption handling.
 
 **Fixed costs and burden (my estimate):**
@@ -114,7 +114,7 @@ Read the table this way: at 100,000 hours a month, the managed options that matt
 - A monitoring and eval setup, plus an on-call burden for a GPU service. Plan on roughly half to one engineer ongoing. That is $8,000 to $15,000 a month in people cost.
 - Languages other than English each need their own evaluation. The managed vendors give this to us.
 
-**Break-even.** Managed cost at $0.23 per hour is $23,000 at 100,000 hours. Self-hosted compute is $8,000 to $25,000 plus $8,000 to $15,000 of people. The two roughly meet near 100,000 hours a month. Below that, managed wins on cost and effort. Above about 300,000 hours a month self-hosting starts to win clearly (my estimate). It stays the escalation path, not the starting point.
+**Break-even.** Managed cost at $0.23 per hour is $23,000 at 100,000 hours. Self-hosted compute is $9,000 to $31,000 plus $8,000 to $15,000 of people, so $17,000 to $46,000. That range straddles the managed $23,000, so the speed and utilisation we actually get decide it near 100,000 hours a month. Below that, managed wins on cost and effort. Above about 300,000 hours a month self-hosting starts to win clearly (my estimate). It stays the escalation path, not the starting point.
 
 **Data handling is its one clear win:** audio never leaves our AWS account, and deletion is ours to prove.
 
@@ -132,8 +132,8 @@ Accessed 2026-10-13.
 
 - [A1] AssemblyAI pricing: https://www.assemblyai.com/pricing
 - [A2] AssemblyAI data retention and model training: https://assemblyai.com/docs/data-retention-and-model-training
-- [A4] AssemblyAI, 99 languages: https://www.assemblyai.com/blog/99-languages
-- [A5] AssemblyAI, how accurate is speech-to-text in 2026 (vendor benchmark): https://www.assemblyai.com/blog/how-accurate-speech-to-text
+- [A3] AssemblyAI, 99 languages: https://www.assemblyai.com/blog/99-languages
+- [A4] AssemblyAI, how accurate is speech-to-text in 2026 (vendor benchmark): https://www.assemblyai.com/blog/how-accurate-speech-to-text
 - [D1] Deepgram pricing: https://deepgram.com/pricing
 - [D2] Deepgram data privacy and compliance: https://developers.deepgram.com/docs/data-privacy-compliance
 - [D3] Deepgram pre-recorded audio docs (file size, timeouts): https://developers.deepgram.com/docs/pre-recorded-audio
@@ -169,3 +169,6 @@ Accessed 2026-10-13.
 - Any independent diarization benchmark on sales-call audio.
 - AWS GPU throughput for the self-hosted stack. The self-host cost range is my estimate.
 - Mistral Voxtral Transcribe pricing and diarization.
+- Whether AssemblyAI bills stereo per channel for this model (ADR 0010 says it does; I did not confirm it).
+- AssemblyAI deletion timing and the scope of EU processing.
+- The Amazon Transcribe price: ADR 0010 uses $0.36 per hour, this report found $1.44 for the first tier from third-party sites, and neither was confirmed from AWS.
