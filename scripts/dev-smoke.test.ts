@@ -7,306 +7,7 @@ import {
   runSmoke,
   type StepResult,
 } from './dev-smoke.ts'
-
-type Seen = { method: string; path: string; body: string }
-
-type FakeOptions = {
-  /** How auth answers a sign-up: `unavailable` is a stack started without a mailbox. */
-  mail?: 'unavailable' | 'sent'
-  /** Core answers a request with no token (a broken guard). */
-  coreOpen?: boolean
-  /** Which core list ignores the Organization in the token and returns every row. */
-  leak?: 'invitations' | 'members' | 'organization'
-  /** Refresh hands back the same refresh token. */
-  reuseRefreshToken?: boolean
-  /** Every access token for a user is the same string, as when two are issued in one second. */
-  sameAccessToken?: boolean
-  /** The mailbox never receives the emails. */
-  dropMail?: boolean
-  /** Auth refuses every verification code. */
-  rejectCode?: boolean
-  /** Core's Invitation email links to another host. */
-  wrongLinkHost?: boolean
-  /** Core refuses to revoke across Organizations with 204 instead of 404. */
-  revokeAcrossOrganizations?: boolean
-}
-
-type Mail = { id: string; to: string; subject: string; text: string }
-
-/**
- * A stand-in for auth, core, the portal and the Mailpit API, with real behaviour for the calls the
- * smoke test makes: codes in a mailbox, one-use refresh tokens, and Organizations that are
- * separate unless an option makes core leak.
- */
-function fakeStack(options: FakeOptions = {}) {
-  const seen: Seen[] = []
-  const mailbox: Mail[] = []
-  const users = new Map<string, { password: string; orgId: string; userId: string; ok: boolean }>()
-  const attempts = new Map<
-    string,
-    { email: string; secret: string; code: string; password: string; name: string }
-  >()
-  const spentRefresh = new Set<string>()
-  const refreshOwner = new Map<string, string>()
-  const sessions = new Map<string, { orgId: string; userId: string }>()
-  const members: { id: string; userId: string; orgId: string; role: string }[] = []
-  const orgs = new Map<string, string>()
-  const invitations: { id: string; orgId: string; email: string; state: string }[] = []
-  let counter = 0
-  const next = (prefix: string) => `${prefix}_${++counter}_${crypto.randomUUID().slice(0, 8)}`
-  const coreTargets = { portal: '' }
-
-  const json = (body: unknown, status = 200) => Response.json(body, { status })
-  const error = (status: number, code: string) => json({ error: { code } }, status)
-
-  const issue = (userId: string, orgId: string) => {
-    const accessToken = options.sameAccessToken ? `at_${userId}` : next('at')
-    const refreshToken = next('rt')
-    sessions.set(accessToken, { orgId, userId })
-    refreshOwner.set(refreshToken, userId)
-    return {
-      sessionId: next('ses'),
-      accessToken,
-      accessTokenExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-      refreshToken,
-      organization: { id: orgId, role: 'owner' },
-    }
-  }
-
-  const auth = async (request: Request, url: URL, body: Record<string, unknown>) => {
-    const path = url.pathname
-    if (path === '/v1/client/sign-ups' && request.method === 'POST') {
-      if (options.mail === 'unavailable') {
-        return error(503, 'mail.unavailable')
-      }
-      const id = next('su')
-      const secret = next('secret')
-      const code = String(100_000 + Math.floor(Math.random() * 900_000))
-      attempts.set(id, {
-        email: String(body.email),
-        secret,
-        code,
-        password: String(body.password),
-        name: String(body.organizationName),
-      })
-      if (!options.dropMail) {
-        mailbox.push({
-          id: next('msg'),
-          to: String(body.email),
-          subject: 'Your Closeline verification code',
-          text: `Your Closeline verification code is ${code}.`,
-        })
-      }
-      return json({
-        id,
-        kind: 'sign_up',
-        step: { status: 'needs_email_code' },
-        attemptSecret: secret,
-      })
-    }
-    const verify = /^\/v1\/client\/sign-ups\/([^/]+)\/verify-email$/.exec(path)
-    if (verify) {
-      const attempt = attempts.get(verify[1] ?? '')
-      if (!attempt || request.headers.get('x-tula-attempt') !== attempt.secret) {
-        return error(401, 'auth.unauthenticated')
-      }
-      if (options.rejectCode || body.code !== attempt.code) {
-        return error(422, 'verification.code_invalid')
-      }
-      const userId = next('usr')
-      const orgId = next('org')
-      users.set(attempt.email, { password: attempt.password, orgId, userId, ok: true })
-      orgs.set(orgId, attempt.name)
-      members.push({ id: next('mem'), userId, orgId, role: 'owner' })
-      return json({ id: verify[1], step: { status: 'complete' } })
-    }
-    if (path === '/v1/client/sign-ins' && request.method === 'POST') {
-      const id = next('si')
-      const secret = next('secret')
-      attempts.set(id, {
-        email: String(body.identifier),
-        secret,
-        code: '',
-        password: '',
-        name: '',
-      })
-      return json({
-        id,
-        kind: 'sign_in',
-        step: { status: 'needs_password' },
-        attemptSecret: secret,
-      })
-    }
-    const password = /^\/v1\/client\/sign-ins\/([^/]+)\/password$/.exec(path)
-    if (password) {
-      const attempt = attempts.get(password[1] ?? '')
-      const user = attempt ? users.get(attempt.email) : undefined
-      if (!attempt || request.headers.get('x-tula-attempt') !== attempt.secret) {
-        return error(401, 'auth.unauthenticated')
-      }
-      if (!user || user.password !== body.password) {
-        return error(401, 'auth.invalid_credentials')
-      }
-      return json({
-        id: password[1],
-        step: { status: 'complete' },
-        session: issue(user.userId, user.orgId),
-      })
-    }
-    if (path === '/v1/client/sessions/refresh' && request.method === 'POST') {
-      const token = String(body.refreshToken)
-      const userId = refreshOwner.get(token)
-      if (!userId || spentRefresh.has(token)) {
-        return error(401, 'auth.token_invalid')
-      }
-      spentRefresh.add(token)
-      const user = [...users.values()].find((candidate) => candidate.userId === userId)
-      if (!user) {
-        return error(401, 'auth.token_invalid')
-      }
-      const issued = issue(userId, user.orgId)
-      return json(options.reuseRefreshToken ? { ...issued, refreshToken: token } : issued)
-    }
-    if (path === '/.well-known/jwks.json') {
-      return json({ keys: [{ kty: 'OKP', alg: 'EdDSA', kid: 'k' }] })
-    }
-    return undefined
-  }
-
-  const core = async (request: Request, url: URL, body: Record<string, unknown>) => {
-    const header = request.headers.get('authorization')
-    const session = header ? sessions.get(header.replace(/^Bearer /, '')) : undefined
-    if (options.coreOpen && url.pathname === '/v1/organization') {
-      return json({ id: 'org_x' })
-    }
-    if (!session) {
-      return error(401, header ? 'auth.token_invalid' : 'auth.unauthenticated')
-    }
-    const { orgId } = session
-    if (url.pathname === '/v1/organization') {
-      const shown = options.leak === 'organization' ? [...orgs.keys()][0] : orgId
-      return json({
-        id: shown,
-        name: orgs.get(shown ?? '') ?? 'x',
-        region: 'local',
-        status: 'active',
-      })
-    }
-    if (url.pathname === '/v1/members') {
-      const rows = options.leak === 'members' ? members : members.filter((m) => m.orgId === orgId)
-      return json({
-        items: rows.map(({ id, userId, role }) => ({ id, userId, role })),
-        nextCursor: null,
-      })
-    }
-    if (url.pathname === '/v1/invitations' && request.method === 'POST') {
-      const id = next('inv')
-      invitations.push({ id, orgId, email: String(body.email), state: 'pending' })
-      if (!options.dropMail) {
-        const host = options.wrongLinkHost ? 'https://elsewhere.invalid' : coreTargets.portal
-        mailbox.push({
-          id: next('msg'),
-          to: String(body.email),
-          subject: 'You are invited to join "Smoke" on Closeline',
-          text: `You have been invited.\n\nAccept the invitation: ${host}/sign-up#invitation=${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().slice(0, 8)}\n\nBye.`,
-        })
-      }
-      return json({ id, email: body.email, role: body.role, state: 'pending' }, 201)
-    }
-    if (url.pathname === '/v1/invitations' && request.method === 'GET') {
-      const rows =
-        options.leak === 'invitations' ? invitations : invitations.filter((i) => i.orgId === orgId)
-      return json({ items: rows, nextCursor: null })
-    }
-    const revoke = /^\/v1\/invitations\/([^/]+)$/.exec(url.pathname)
-    if (revoke && request.method === 'DELETE') {
-      const found = invitations.find((i) => i.id === revoke[1] && i.orgId === orgId)
-      if (!found) {
-        return options.revokeAcrossOrganizations
-          ? new Response(null, { status: 204 })
-          : error(404, 'invitation.not_found')
-      }
-      found.state = 'revoked'
-      return new Response(null, { status: 204 })
-    }
-    return undefined
-  }
-
-  const mail = (url: URL) => {
-    if (url.pathname === '/livez') {
-      return new Response('ok')
-    }
-    if (url.pathname === '/api/v1/search') {
-      const to = (url.searchParams.get('query') ?? '').replace(/^to:/, '')
-      const messages = mailbox
-        .filter((m) => m.to === to)
-        .map((m) => ({ ID: m.id, Subject: m.subject, To: [{ Address: m.to }] }))
-      return json({ messages, messages_count: messages.length })
-    }
-    const one = /^\/api\/v1\/message\/([^/]+)$/.exec(url.pathname)
-    if (one) {
-      const found = mailbox.find((m) => m.id === one[1])
-      return found
-        ? json({ ID: found.id, Subject: found.subject, Text: found.text, HTML: '' })
-        : error(404, 'not_found')
-    }
-    return undefined
-  }
-
-  const serve = (which: 'auth' | 'core' | 'portal' | 'mail') =>
-    Bun.serve({
-      port: 0,
-      hostname: '127.0.0.1',
-      fetch: async (request) => {
-        const url = new URL(request.url)
-        const raw = await request.text()
-        seen.push({ method: request.method, path: url.pathname, body: raw })
-        if (url.pathname === '/readyz') {
-          return json({ status: 'ok' })
-        }
-        if (which === 'portal') {
-          return new Response('<!doctype html>', { headers: { 'content-type': 'text/html' } })
-        }
-        let body: Record<string, unknown> = {}
-        try {
-          body = raw === '' ? {} : (JSON.parse(raw) as Record<string, unknown>)
-        } catch {
-          return error(400, 'request.invalid')
-        }
-        const answer =
-          which === 'auth'
-            ? await auth(request, url, body)
-            : which === 'core'
-              ? await core(request, url, body)
-              : mail(url)
-        return answer ?? new Response('{}', { status: 404 })
-      },
-    })
-
-  const servers = {
-    auth: serve('auth'),
-    core: serve('core'),
-    portal: serve('portal'),
-    mail: serve('mail'),
-  }
-  const origin = (name: keyof typeof servers) => `http://127.0.0.1:${servers[name].port}`
-  coreTargets.portal = origin('portal')
-  return {
-    seen,
-    mailbox,
-    targets: {
-      auth: origin('auth'),
-      core: origin('core'),
-      portal: origin('portal'),
-      mail: origin('mail'),
-    },
-    stop: () => {
-      for (const server of Object.values(servers)) {
-        server.stop(true)
-      }
-    },
-  }
-}
+import { type FakeOptions, fakeStack } from './dev-smoke-fake.ts'
 
 const by = (results: StepResult[], name: string) => results.find((result) => result.name === name)
 const fast = { timeoutMs: 1_000, mailWaitMs: 400, mailIntervalMs: 20 }
@@ -336,13 +37,17 @@ describe('runSmoke against a healthy stack', () => {
     expect(by(results, 'the mailbox is ready')?.status).toBe('pass')
   })
 
-  test('each sign-up is sent once and every refresh token is used once', async () => {
+  test('each sign-up is sent once and a refresh token is used once, except the deliberate replay', async () => {
     const { stack } = await run()
     expect(stack.seen.filter((call) => call.path === '/v1/client/sign-ups')).toHaveLength(2)
-    expect(stack.seen.filter((call) => call.path === '/v1/client/sessions/refresh')).toHaveLength(1)
+    const refreshes = stack.seen
+      .filter((call) => call.path === '/v1/client/sessions/refresh')
+      .map((call) => call.body)
+    expect(refreshes).toHaveLength(5)
+    expect(refreshes.length - new Set(refreshes).size).toBe(1)
     expect(
       stack.seen.filter((call) => call.path === '/v1/invitations' && call.method === 'POST')
-    ).toHaveLength(1)
+    ).toHaveLength(2)
   })
 
   test('the sign-up uses a reserved .test domain and a fresh address each run', async () => {
@@ -471,6 +176,7 @@ describe('Organization isolation', () => {
     ['invitations', 'GET /v1/invitations'],
     ['members', 'GET /v1/members'],
     ['organization', 'GET /v1/organization'],
+    ['teams', 'GET /v1/teams'],
   ] as const)('a core that leaks %s to the second user fails the check', async (leak, label) => {
     const { results } = await run({ leak })
     const check = by(results, 'a second sign-up cannot read the first Organization')

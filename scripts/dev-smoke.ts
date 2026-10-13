@@ -44,7 +44,9 @@ export const ACCOUNT_STEPS = [
   'refresh the session',
   'create an Invitation',
   'the Invitation email and its link reach the mailbox',
+  'create a Team',
   'a second sign-up cannot read the first Organization',
+  'a replayed refresh token is refused and ends its session',
 ] as const
 
 /** An object's property, or undefined for anything that is not an object. */
@@ -61,9 +63,31 @@ function pick(value: unknown, ...path: string[]): unknown {
 
 const text = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined)
 
-/** The `error.code` of a contract error body, or undefined. */
+/** The shape the contract gives every error code: `area.reason`, at most 100 characters. */
+const CONTRACT_CODE = /^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/
+const NOT_A_CODE = '(not a contract error code)'
+
+/**
+ * The `error.code` of a contract error body, undefined if there is none, and a fixed placeholder
+ * if it does not have the contract's shape: a service must not be able to put text in the report.
+ */
 function errorCode(json: unknown): string | undefined {
-  return text(pick(json, 'error', 'code'))
+  const code = text(pick(json, 'error', 'code'))
+  if (code === undefined) {
+    return undefined
+  }
+  return code.length <= 100 && CONTRACT_CODE.test(code) ? code : NOT_A_CODE
+}
+
+/** The forms a value can take in a message: as is, URL-encoded (either case), JSON-escaped. */
+function forms(value: string): string[] {
+  const encoded = encodeURIComponent(value)
+  return [
+    value,
+    encoded,
+    encoded.replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase()),
+    JSON.stringify(value).slice(1, -1),
+  ]
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -84,8 +108,9 @@ type State = {
   code?: string
   verified?: true
   session?: Session
-  members?: { userIds: string[] }
+  members?: { userIds: string[]; membershipIds: string[] }
   invitation?: { id: string; email: string }
+  team?: { id: string; name: string }
 }
 
 /**
@@ -107,7 +132,8 @@ export async function runSmoke(
   }
   const hide = (message: string) => {
     let out = message
-    for (const value of seen) {
+    const all = [...seen].flatMap(forms).sort((a, b) => b.length - a.length)
+    for (const value of all) {
       out = out.split(value).join('[hidden]')
     }
     return out
@@ -151,32 +177,68 @@ export async function runSmoke(
   const fail = (detail: string): Outcome => ({ status: 'fail', detail })
   const skip = (detail: string): Outcome => ({ status: 'skip', detail })
 
-  // The mailbox: the newest message to `to` whose subject has `subject`, waited for with a bound.
-  const mailbox = async (to: string, subject: string): Promise<string | undefined> => {
+  // The mailbox. Mailpit's `to:` search is a substring match, so the answer is filtered here: one
+  // message, to exactly this address, with this subject. A message that is late is waited for
+  // until the deadline; a mailbox that answers wrongly is a mailbox failure, reported at once.
+  type Mailed = { ok: true; text: string } | { ok: false; late: boolean; detail: string }
+  const mailBroken = (detail: string): Mailed => ({ ok: false, late: false, detail })
+  const mailbox = async (to: string, subject: string): Promise<Mailed> => {
     const deadline = Date.now() + (options.mailWaitMs ?? 15_000)
     for (;;) {
       const query = encodeURIComponent(`to:${to}`)
       const found = await call('GET', `${targets.mail}/api/v1/search?query=${query}&limit=10`)
+      if (found.status !== 200) {
+        return mailBroken(`the mailbox answered ${found.status} to the search`)
+      }
       const messages = pick(found.json, 'messages')
-      if (found.status === 200 && Array.isArray(messages)) {
-        const match = messages.find((message) => text(pick(message, 'Subject'))?.includes(subject))
-        const id = text(pick(match, 'ID'))
-        if (id) {
-          const message = await call(
-            'GET',
-            `${targets.mail}/api/v1/message/${encodeURIComponent(id)}`
-          )
-          const body = text(pick(message.json, 'Text'))
-          if (message.status === 200 && body !== undefined) {
-            return body
-          }
+      if (!Array.isArray(messages)) {
+        return mailBroken('the mailbox search reply is not what Mailpit sends')
+      }
+      const matches = messages.filter((message) => {
+        const recipients = pick(message, 'To')
+        return (
+          text(pick(message, 'Subject'))?.includes(subject) === true &&
+          Array.isArray(recipients) &&
+          recipients.some((recipient) => pick(recipient, 'Address') === to)
+        )
+      })
+      if (matches.length > 1) {
+        return mailBroken('the mailbox holds more than one such email for this address')
+      }
+      const id = text(pick(matches[0], 'ID'))
+      if (matches.length === 1 && id) {
+        const message = await call(
+          'GET',
+          `${targets.mail}/api/v1/message/${encodeURIComponent(id)}`
+        )
+        const body = text(pick(message.json, 'Text'))
+        if (message.status !== 200 || body === undefined) {
+          return mailBroken(`the mailbox answered ${message.status} for the message`)
         }
+        return { ok: true, text: body }
       }
       if (Date.now() >= deadline) {
-        return undefined
+        return { ok: false, late: true, detail: '' }
       }
       await Bun.sleep(options.mailIntervalMs ?? 200)
     }
+  }
+  /** Why an email could not be read, as a step failure. */
+  const unread = (mailed: Extract<Mailed, { ok: false }>, what: string) =>
+    mailed.late
+      ? fail(`no ${what} email reached the mailbox in time`)
+      : fail(`mailbox failure: ${mailed.detail}`)
+  /** The one six-digit code in a verification email, or why there is not exactly one. */
+  const codeIn = (body: string): { code: string } | { problem: string } => {
+    const phrased = [...body.matchAll(/verification code is (\d{6})(?!\d)/g)]
+    const numbers = body.match(/(?<!\d)\d{6}(?!\d)/g) ?? []
+    if (phrased.length > 1 || numbers.length > 1) {
+      return { problem: 'the verification email holds more than one code' }
+    }
+    const code = phrased[0]?.[1]
+    return code === undefined
+      ? { problem: 'the verification email has no six-digit code' }
+      : { code }
   }
 
   await step('auth is ready', async () => {
@@ -357,16 +419,16 @@ export async function runSmoke(
   })
 
   await flow('read the verification code from the mailbox', ['attempt'], ['code'], async () => {
-    const body = await mailbox(email, 'verification code')
-    if (body === undefined) {
-      return fail('no verification email reached the mailbox in time')
+    const mailed = await mailbox(email, 'verification code')
+    if (!mailed.ok) {
+      return unread(mailed, 'verification')
     }
-    const code = /verification code is (\d{6})/.exec(body)?.[1]
-    if (!code) {
-      return fail('the verification email has no six-digit code')
+    const found = codeIn(mailed.text)
+    if ('problem' in found) {
+      return fail(found.problem)
     }
-    remember(code)
-    state.code = code
+    remember(found.code)
+    state.code = found.code
     return pass()
   })
 
@@ -430,7 +492,10 @@ export async function runSmoke(
         `expected one member who is the Owner, got ${items.length} member(s), ${owners.length} Owner(s)`
       )
     }
-    state.members = { userIds: items.map((item) => text(pick(item, 'userId')) ?? '') }
+    state.members = {
+      userIds: items.map((item) => text(pick(item, 'userId')) ?? ''),
+      membershipIds: items.map((item) => text(pick(item, 'id')) ?? ''),
+    }
     remember(...state.members.userIds)
     return pass('1 member, the Owner')
   })
@@ -496,16 +561,25 @@ export async function runSmoke(
     ['invitation'],
     [],
     async () => {
-      const body = await mailbox(inviteeEmail, 'invited')
-      if (body === undefined) {
-        return fail('no Invitation email reached the mailbox in time')
+      const mailed = await mailbox(inviteeEmail, 'invited')
+      if (!mailed.ok) {
+        return unread(mailed, 'Invitation')
       }
-      const link = /https?:\/\/[^\s"<>]+#invitation=([A-Za-z0-9_-]{22,256})/.exec(body)
-      if (!link) {
+      const links = mailed.text.match(/https?:\/\/[^\s"<>]*#invitation=[^\s"<>]*/g) ?? []
+      remember(...links)
+      if (links.length > 1) {
+        return fail('the Invitation email holds more than one accept link')
+      }
+      const link = links[0]
+      if (link === undefined) {
         return fail('the Invitation email has no accept link')
       }
-      remember(link[0], link[1])
-      const url = new URL(link[0])
+      const token = link.split('#invitation=')[1] ?? ''
+      remember(token)
+      if (!/^[A-Za-z0-9_-]{22,256}$/.test(token)) {
+        return fail('the accept link has no valid invitation token')
+      }
+      const url = new URL(link)
       if (url.origin !== new URL(targets.portal).origin || url.pathname !== '/sign-up') {
         return fail('the accept link does not point at the portal sign-up page')
       }
@@ -513,30 +587,59 @@ export async function runSmoke(
     }
   )
 
+  await flow('create a Team', ['session'], ['team'], async () => {
+    const session = state.session
+    if (!session) {
+      return fail('no session')
+    }
+    const name = `Smoke team ${runId}`
+    const found = await call('POST', `${targets.core}/v1/teams`, {
+      headers: { ...authed(session), 'idempotency-key': `smoke-${runId}-team` },
+      body: { name },
+      once: true,
+    })
+    const id = text(pick(found.json, 'id'))
+    if (found.status !== 201 || !id) {
+      return fail(`POST /v1/teams answered ${found.status} ${errorCode(found.json) ?? ''}`.trim())
+    }
+    state.team = { id, name }
+    remember(id)
+    return pass()
+  })
+
   await flow(
     'a second sign-up cannot read the first Organization',
-    ['session', 'members', 'invitation'],
+    ['session', 'members', 'invitation', 'team'],
     [],
     async () => {
-      const first = state.session
-      const firstMembers = state.members
       const invitation = state.invitation
-      if (!first || !firstMembers || !invitation) {
+      const firstMembers = state.members
+      const team = state.team
+      if (!state.session || !firstMembers || !invitation || !team) {
         return fail('missing the first Organization')
       }
+      // An access token lasts 60 s, so the first user gets a fresh one for the checks below.
+      const firstIn = await signIn(email, password)
+      if ('error' in firstIn) {
+        return fail(firstIn.error ?? 'the first sign-in failed')
+      }
+      const first = firstIn.session
       const email2 = `second-${runId}@closeline-smoke.test`
       const password2 = `${randomHex(16)}-Aa1`
       const started = await startSignUp(email2, password2, `Smoke second ${runId}`)
       if (started.status !== 200 || !started.id || !started.secret) {
         return fail(`the second sign-up answered ${started.status} ${started.code ?? ''}`.trim())
       }
-      const body = await mailbox(email2, 'verification code')
-      const code = body === undefined ? undefined : /verification code is (\d{6})/.exec(body)?.[1]
-      if (!code) {
-        return fail('the second sign-up code did not reach the mailbox')
+      const mailed = await mailbox(email2, 'verification code')
+      if (!mailed.ok) {
+        return unread(mailed, 'second verification')
       }
-      remember(code)
-      const verified = await verify({ id: started.id, secret: started.secret }, code)
+      const found = codeIn(mailed.text)
+      if ('problem' in found) {
+        return fail(`the second sign-up: ${found.problem}`)
+      }
+      remember(found.code)
+      const verified = await verify({ id: started.id, secret: started.secret }, found.code)
       if (verified.status !== 200) {
         return fail(
           `the second sign-up verify answered ${verified.status} ${verified.code ?? ''}`.trim()
@@ -547,71 +650,269 @@ export async function runSmoke(
         return fail(second.error ?? 'the second sign-in failed')
       }
       const token = second.session
+      const other = authed(token)
       if (token.organizationId === first.organizationId) {
         return fail('the second user was put into the first Organization')
       }
+      const firstIds = [
+        first.organizationId,
+        invitation.id,
+        invitation.email,
+        email,
+        team.id,
+        ...firstMembers.userIds,
+        ...firstMembers.membershipIds,
+      ].filter((value) => value !== '')
       const leaks = (json: unknown) => {
         const body = JSON.stringify(json) ?? ''
-        return [
-          first.organizationId,
-          invitation.id,
-          invitation.email,
-          email,
-          ...firstMembers.userIds,
-        ].filter((value) => value !== '' && body.includes(value))
+        return firstIds.filter((value) => body.includes(value))
       }
-      const reads = [
-        [
-          'GET /v1/organization',
-          await call('GET', `${targets.core}/v1/organization`, { headers: authed(token) }),
-        ],
-        [
-          'GET /v1/members',
-          await call('GET', `${targets.core}/v1/members`, { headers: authed(token) }),
-        ],
-        [
-          'GET /v1/invitations',
-          await call('GET', `${targets.core}/v1/invitations`, { headers: authed(token) }),
-        ],
-      ] as const
-      for (const [label, found] of reads) {
-        if (found.status !== 200) {
-          return fail(
-            `${label} answered ${found.status} ${errorCode(found.json) ?? ''} for the second user`.trim()
-          )
+      const core = (path: string) => `${targets.core}${path}`
+      const status = (response: { status: number; json: unknown }) =>
+        `${response.status} ${errorCode(response.json) ?? ''}`.trim()
+
+      // 1. Reads with the second token: its own Organization, nothing of the first.
+      const reads = {
+        'GET /v1/organization': await call('GET', core('/v1/organization'), { headers: other }),
+        'GET /v1/members': await call('GET', core('/v1/members'), { headers: other }),
+        'GET /v1/invitations': await call('GET', core('/v1/invitations'), { headers: other }),
+        'GET /v1/teams': await call('GET', core('/v1/teams'), { headers: other }),
+      }
+      for (const [label, response] of Object.entries(reads)) {
+        if (response.status !== 200) {
+          return fail(`${label} answered ${status(response)} for the second user`)
         }
-        if (leaks(found.json).length > 0) {
+        if (leaks(response.json).length > 0) {
           return fail(`${label} returned data of the first Organization to the second user`)
         }
       }
-      if (pick(reads[0][1].json, 'id') !== token.organizationId) {
+      if (pick(reads['GET /v1/organization'].json, 'id') !== token.organizationId) {
         return fail('core returned an Organization other than the one in the second token')
       }
-      const members = pick(reads[1][1].json, 'items')
-      if (!Array.isArray(members) || members.length !== 1) {
+      const ownMembers = pick(reads['GET /v1/members'].json, 'items')
+      if (!Array.isArray(ownMembers) || ownMembers.length !== 1) {
         return fail('the second user does not see exactly their own member')
       }
-      // A write across the boundary: the second token must not be able to revoke the first
-      // Organization's Invitation, and the first token must still see it pending.
-      const revoke = await call('DELETE', `${targets.core}/v1/invitations/${invitation.id}`, {
-        headers: authed(token),
-        once: true,
-      })
-      if (revoke.status !== 404) {
-        return fail(
-          `DELETE of the first Organization's Invitation by the second user answered ${revoke.status}, not 404`
-        )
+      const ownMembershipId = text(pick(ownMembers[0], 'id')) ?? ''
+
+      // 2. The first Organization id sent with the second token, where a service might read it:
+      //    ignored (the second Organization answers) or refused, never obeyed.
+      const sentWith = [
+        ['header', '/v1/organization', { 'x-organization-id': first.organizationId }],
+        ['query', `/v1/organization?organizationId=${first.organizationId}`, {}],
+        ['header', '/v1/invitations', { 'x-organization-id': first.organizationId }],
+        ['query', `/v1/invitations?organizationId=${first.organizationId}`, {}],
+      ] as const
+      for (const [where, path, extra] of sentWith) {
+        const response = await call('GET', core(path), { headers: { ...other, ...extra } })
+        const refused = [400, 403, 404, 422].includes(response.status)
+        const ignored =
+          response.status === 200 &&
+          leaks(response.json).length === 0 &&
+          (path.startsWith('/v1/organization')
+            ? pick(response.json, 'id') === token.organizationId
+            : true)
+        if (!(refused || ignored)) {
+          return fail(
+            `core obeyed an Organization id sent in a ${where} with the second token: GET ${path.split('?')[0]} answered ${response.status}`
+          )
+        }
       }
-      const still = await call('GET', `${targets.core}/v1/invitations`, { headers: authed(first) })
-      const items = pick(still.json, 'items')
+
+      // 3. Writes by id against the first Organization with the second token: the documented
+      //    not-found, and nothing changes.
+      const writes: {
+        label: string
+        method: string
+        path: string
+        body?: unknown
+        code: string
+      }[] = [
+        {
+          label: 'DELETE /v1/invitations/{invitationId}',
+          method: 'DELETE',
+          path: `/v1/invitations/${invitation.id}`,
+          code: 'invitation.not_found',
+        },
+        {
+          label: 'PATCH /v1/teams/{teamId}',
+          method: 'PATCH',
+          path: `/v1/teams/${team.id}`,
+          body: { name: 'taken over' },
+          code: 'team.not_found',
+        },
+        {
+          label: 'DELETE /v1/teams/{teamId}',
+          method: 'DELETE',
+          path: `/v1/teams/${team.id}`,
+          code: 'team.not_found',
+        },
+        {
+          label: 'POST /v1/teams/{teamId}/members',
+          method: 'POST',
+          path: `/v1/teams/${team.id}/members`,
+          body: { membershipId: ownMembershipId },
+          code: 'team.not_found',
+        },
+        {
+          label: 'PATCH /v1/members/{membershipId}',
+          method: 'PATCH',
+          path: `/v1/members/${firstMembers.membershipIds[0] ?? ''}`,
+          body: { role: 'rep' },
+          code: 'member.not_found',
+        },
+        {
+          label: 'POST /v1/invitations with the first Organization teamId',
+          method: 'POST',
+          path: '/v1/invitations',
+          body: { email: `cross-${runId}@closeline-smoke.test`, role: 'rep', teamId: team.id },
+          code: 'team.not_found',
+        },
+      ]
+      for (const write of writes) {
+        const response = await call(write.method, core(write.path), {
+          headers: {
+            ...other,
+            'idempotency-key': `smoke-${runId}-x-${write.method}-${write.code}`,
+          },
+          body: write.body,
+          once: true,
+        })
+        if (response.status !== 404 || errorCode(response.json) !== write.code) {
+          return fail(
+            `${write.label} by the second user answered ${status(response)}, not 404 ${write.code}`
+          )
+        }
+      }
+
+      // 4. The first Organization is as it was.
+      const stillInvitations = await call('GET', core('/v1/invitations'), {
+        headers: authed(first),
+      })
+      const invitationItems = pick(stillInvitations.json, 'items')
       const stillPending =
-        Array.isArray(items) &&
-        items.some(
+        Array.isArray(invitationItems) &&
+        invitationItems.some(
           (item) => pick(item, 'id') === invitation.id && pick(item, 'state') === 'pending'
         )
-      return stillPending
-        ? pass('different Organizations; nothing of the first was returned or changed')
-        : fail('the first Organization lost its pending Invitation')
+      if (!stillPending) {
+        return fail('the first Organization lost its pending Invitation')
+      }
+      const stillTeams = await call('GET', core('/v1/teams'), { headers: authed(first) })
+      const teamItems = pick(stillTeams.json, 'items')
+      const stillTeam =
+        Array.isArray(teamItems) &&
+        teamItems.some((item) => pick(item, 'id') === team.id && pick(item, 'name') === team.name)
+      if (!stillTeam) {
+        return fail('the first Organization lost its Team or its name was changed')
+      }
+      const stillMembers = await call('GET', core('/v1/members'), { headers: authed(first) })
+      const memberItems = pick(stillMembers.json, 'items')
+      if (
+        !Array.isArray(memberItems) ||
+        !memberItems.some(
+          (item) =>
+            pick(item, 'id') === firstMembers.membershipIds[0] && pick(item, 'role') === 'owner'
+        )
+      ) {
+        return fail('the first Organization member is no longer its Owner')
+      }
+
+      // 5. Positive controls: the first user can do to their own what the second could not, so a
+      //    route that answers 404 to everyone fails here and not as a pass above.
+      const renamed = await call('PATCH', core(`/v1/teams/${team.id}`), {
+        headers: authed(first),
+        body: { name: `${team.name} renamed` },
+        once: true,
+      })
+      if (renamed.status !== 200) {
+        return fail(
+          `the first user could not rename their own Team: PATCH /v1/teams/{teamId} answered ${status(renamed)}`
+        )
+      }
+      const removed = await call('DELETE', core(`/v1/teams/${team.id}`), {
+        headers: authed(first),
+        once: true,
+      })
+      if (removed.status !== 204) {
+        return fail(
+          `the first user could not delete their own Team: DELETE /v1/teams/{teamId} answered ${status(removed)}`
+        )
+      }
+      const revoked = await call('DELETE', core(`/v1/invitations/${invitation.id}`), {
+        headers: authed(first),
+        once: true,
+      })
+      if (revoked.status !== 204) {
+        return fail(
+          `the first user could not revoke their own Invitation: DELETE /v1/invitations/{invitationId} answered ${status(revoked)}`
+        )
+      }
+      const after = await call('GET', core('/v1/invitations'), { headers: authed(first) })
+      const afterItems = pick(after.json, 'items')
+      if (
+        !Array.isArray(afterItems) ||
+        afterItems.some((item) => pick(item, 'id') === invitation.id)
+      ) {
+        return fail('the revoked Invitation is still listed as pending')
+      }
+      return pass(
+        'different Organizations; nothing of the first was returned or changed; the first can change its own'
+      )
+    }
+  )
+
+  // Last, on a session made only for this: reusing a refresh token may end the whole session.
+  await flow(
+    'a replayed refresh token is refused and ends its session',
+    ['session'],
+    [],
+    async () => {
+      const throwaway = await signIn(email, password)
+      if ('error' in throwaway) {
+        return fail(throwaway.error ?? 'the sign-in for the replay failed')
+      }
+      const refreshWith = async (refreshToken: string) => {
+        const response = await call('POST', `${targets.auth}/v1/client/sessions/refresh`, {
+          body: { refreshToken },
+          once: true,
+        })
+        return {
+          status: response.status,
+          code: errorCode(response.json),
+          session: sessionFrom(response.json),
+        }
+      }
+      const spent = throwaway.session.refreshToken
+      const second = await refreshWith(spent)
+      const third = second.session ? await refreshWith(second.session.refreshToken) : undefined
+      if (second.status !== 200 || !second.session || third?.status !== 200 || !third.session) {
+        return fail(
+          `two ordinary refreshes did not work: ${second.status} ${second.code ?? ''}, ${third?.status ?? 'not tried'} ${third?.code ?? ''}`.trim()
+        )
+      }
+      const replay = await refreshWith(spent)
+      if (replay.status !== 401 || replay.code !== 'session.reuse_detected') {
+        return fail(
+          `replaying a spent refresh token answered ${replay.status} ${replay.code ?? ''}, not 401 session.reuse_detected`.replace(
+            '  ',
+            ' '
+          )
+        )
+      }
+      const newest = await refreshWith(third.session.refreshToken)
+      if (newest.status === 200) {
+        return fail('the session is still usable after a refresh token was reused')
+      }
+      if (
+        newest.status !== 401 ||
+        !['session.reuse_detected', 'session.revoked'].includes(newest.code ?? '')
+      ) {
+        return fail(
+          `the newest refresh token of a reused session answered ${newest.status} ${newest.code ?? ''}, not 401 session.revoked`
+        )
+      }
+      return pass('the spent token was refused and the session ended')
     }
   )
 
