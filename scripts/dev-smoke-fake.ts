@@ -4,7 +4,7 @@
 // test can show the smoke test notices.
 
 /** One request the fake saw. */
-export type Seen = { method: string; path: string; body: string }
+export type Seen = { method: string; path: string; body: string; key: string | null }
 
 /** What can be broken in the fake. Every option is off by default. */
 export type FakeOptions = {
@@ -31,7 +31,7 @@ export type FakeOptions = {
   /** The mailbox search answers 500, or junk, or JSON without `messages`. */
   mailBroken?: '500' | 'junk' | 'no-messages'
   /** The verification email holds two codes, or none. */
-  codes?: 'two' | 'none'
+  codes?: 'two' | 'none' | 'other-phrase'
   /** The Invitation email holds two links, or none. */
   links?: 'two' | 'none'
   /** Auth refuses every verification code. */
@@ -52,6 +52,30 @@ export type FakeOptions = {
   silentCrossRevoke?: boolean
   /** Core answers every Team rename with 404, even for the owner. */
   teamRenameNotFoundForEveryone?: boolean
+  /** What core says for its Organization's status and region. */
+  coreStatus?: string
+  coreRegion?: string
+  /** Core renames another Organization's Team but still answers 404. */
+  silentCrossTeamWrite?: boolean
+  /** Core changes another Organization's member role but still answers 404. */
+  silentCrossMemberWrite?: boolean
+  /** Core lets another Organization's token delete a member. */
+  crossMemberDelete?: boolean
+  /** Core lets another Organization's token remove a Team member. */
+  crossTeamMemberDelete?: boolean
+  /** Core answers every Team delete with 404, even for the owner. */
+  teamDeleteNotFoundForEveryone?: boolean
+  /** Revoking an Invitation answers 204 but leaves it pending and listed. */
+  revokeKeepsListed?: boolean
+  /** Creating an Invitation answers 200, or says its state is something other than pending. */
+  createInvitationAs200?: boolean
+  invitationNotPending?: boolean
+  /** The error code of a refused replay, and of the newest token after the reuse. */
+  replayCode?: string
+  newestCode?: string
+  /** Every email is accompanied by a second one with another subject, or sent twice. */
+  extraMail?: boolean
+  duplicateMail?: boolean
   /** Core answers every Team route with 404, even for the owner. */
   teamsNotFoundForEveryone?: boolean
   /** Core takes the Organization from an `x-organization-id` header or `organizationId` query. */
@@ -86,6 +110,18 @@ export function fakeStack(options: FakeOptions = {}) {
   const addMail = (to: string, subject: string, text: string) => {
     const visibleAt = Date.now() + (options.mailDelayMs ?? 0)
     mailbox.push({ id: next('msg'), to, subject, text, visibleAt })
+    if (options.duplicateMail) {
+      mailbox.push({ id: next('msg'), to, subject, text, visibleAt })
+    }
+    if (options.extraMail) {
+      mailbox.push({
+        id: next('msg'),
+        to,
+        subject: 'Welcome to Closeline',
+        text: 'Welcome. Your Closeline verification code is 999999. Join: https://x.invalid/#invitation=aaaaaaaaaaaaaaaaaaaaaaaa',
+        visibleAt,
+      })
+    }
     if (options.staleMail) {
       mailbox.push({
         id: next('msg'),
@@ -138,9 +174,11 @@ export function fakeStack(options: FakeOptions = {}) {
         const line =
           options.codes === 'none'
             ? 'Your Closeline verification code is in the app.'
-            : options.codes === 'two'
-              ? `Your Closeline verification code is ${code}. The old one was 654321.`
-              : `Your Closeline verification code is ${code}.`
+            : options.codes === 'other-phrase'
+              ? `Your code: ${code}`
+              : options.codes === 'two'
+                ? `Your Closeline verification code is ${code}. The old one was 654321.`
+                : `Your Closeline verification code is ${code}.`
         addMail(String(body.email), 'Your Closeline verification code', line)
       }
       return json({
@@ -206,7 +244,7 @@ export function fakeStack(options: FakeOptions = {}) {
         return error(401, 'session.invalid_token')
       }
       if (revokedSessions.has(found.sid)) {
-        return error(401, 'session.reuse_detected')
+        return error(401, options.newestCode ?? 'session.reuse_detected')
       }
       const user = [...users.values()].find((candidate) => candidate.userId === found.userId)
       if (!user) {
@@ -219,7 +257,7 @@ export function fakeStack(options: FakeOptions = {}) {
           if (!options.reuseKeepsSession) {
             revokedSessions.add(found.sid)
           }
-          return error(401, 'session.reuse_detected')
+          return error(401, options.replayCode ?? 'session.reuse_detected')
         }
         const again = issue(user.userId, user.orgId, found.sid)
         return json({ ...again, refreshToken: found.child })
@@ -254,8 +292,8 @@ export function fakeStack(options: FakeOptions = {}) {
       return json({
         id: shown,
         name: orgs.get(shown ?? '') ?? 'x',
-        region: 'local',
-        status: 'active',
+        region: options.coreRegion ?? 'local',
+        status: options.coreStatus ?? 'active',
       })
     }
     if (pathname === '/v1/members' && method === 'GET') {
@@ -266,11 +304,27 @@ export function fakeStack(options: FakeOptions = {}) {
       })
     }
     const member = /^\/v1\/members\/([^/]+)$/.exec(pathname)
+    if (member && method === 'DELETE') {
+      const found = members.find(
+        (m) => m.id === member[1] && (m.orgId === orgId || options.crossMemberDelete)
+      )
+      if (!found) {
+        return error(404, 'member.not_found')
+      }
+      members.splice(members.indexOf(found), 1)
+      return new Response(null, { status: 204 })
+    }
     if (member && method === 'PATCH') {
       const found = members.find(
         (m) => m.id === member[1] && (m.orgId === orgId || options.crossMemberWrite)
       )
       if (!found) {
+        if (options.silentCrossMemberWrite) {
+          const other = members.find((m) => m.id === member[1])
+          if (other) {
+            other.role = String(body.role)
+          }
+        }
         return error(404, 'member.not_found')
       }
       found.role = String(body.role)
@@ -302,7 +356,15 @@ export function fakeStack(options: FakeOptions = {}) {
           `You have been invited.\n\nAccept the invitation: ${links}\n\nBye.`
         )
       }
-      return json({ id, email: body.email, role: body.role, state: 'pending' }, 201)
+      return json(
+        {
+          id,
+          email: body.email,
+          role: body.role,
+          state: options.invitationNotPending ? 'sent' : 'pending',
+        },
+        options.createInvitationAs200 ? 200 : 201
+      )
     }
     if (pathname === '/v1/invitations' && method === 'GET') {
       const rows =
@@ -328,7 +390,9 @@ export function fakeStack(options: FakeOptions = {}) {
         }
         return error(404, options.revokeWrongCode ? 'thing.gone' : 'invitation.not_found')
       }
-      found.state = 'revoked'
+      if (!options.revokeKeepsListed) {
+        found.state = 'revoked'
+      }
       return new Response(null, { status: 204 })
     }
     if (pathname.startsWith('/v1/teams') && options.teamsNotFoundForEveryone) {
@@ -349,6 +413,12 @@ export function fakeStack(options: FakeOptions = {}) {
         (t) => t.id === team[1] && (t.orgId === orgId || options.crossTeamWrite)
       )
       if (!found) {
+        if (options.silentCrossTeamWrite && method === 'PATCH') {
+          const other = teams.find((t) => t.id === team[1])
+          if (other) {
+            other.name = String(body.name)
+          }
+        }
         return error(404, 'team.not_found')
       }
       if (method === 'PATCH') {
@@ -359,9 +429,22 @@ export function fakeStack(options: FakeOptions = {}) {
         return json({ id: found.id, name: found.name })
       }
       if (method === 'DELETE') {
+        if (options.teamDeleteNotFoundForEveryone) {
+          return error(404, 'team.not_found')
+        }
         teams.splice(teams.indexOf(found), 1)
         return new Response(null, { status: 204 })
       }
+    }
+    const teamMemberDelete = /^\/v1\/teams\/([^/]+)\/members\/([^/]+)$/.exec(pathname)
+    if (teamMemberDelete && method === 'DELETE') {
+      if (
+        !options.crossTeamMemberDelete &&
+        !teams.some((t) => t.id === teamMemberDelete[1] && t.orgId === orgId)
+      ) {
+        return error(404, 'team.not_found')
+      }
+      return new Response(null, { status: 204 })
     }
     const teamMember = /^\/v1\/teams\/([^/]+)\/members$/.exec(pathname)
     if (teamMember && method === 'POST') {
@@ -416,7 +499,12 @@ export function fakeStack(options: FakeOptions = {}) {
       fetch: async (request) => {
         const url = new URL(request.url)
         const raw = await request.text()
-        seen.push({ method: request.method, path: url.pathname, body: raw })
+        seen.push({
+          method: request.method,
+          path: url.pathname,
+          body: raw,
+          key: request.headers.get('idempotency-key'),
+        })
         if (url.pathname === '/readyz') {
           return json({ status: 'ok' })
         }

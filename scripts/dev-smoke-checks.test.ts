@@ -273,6 +273,11 @@ describe('nothing secret is printed, in any form', () => {
       secretOf: (c) => [header(c, 'authorization').replace(/^Bearer /, '')],
     },
     {
+      kind: 'sign-in attempt secret',
+      matches: (c) => c.url.includes('/sign-ins/') && c.url.endsWith('/password'),
+      secretOf: (c) => [header(c, 'x-tula-attempt')],
+    },
+    {
       kind: 'refresh token',
       matches: (c) => c.url.endsWith('/sessions/refresh'),
       secretOf: (c) => [field(c, 'refreshToken')],
@@ -340,4 +345,192 @@ describe('nothing secret is printed, in any form', () => {
     const { results } = await run({ rejectCode: true })
     expect(by(results, 'verify the email code')?.detail).toContain('verification.code_invalid')
   })
+})
+
+describe('more cross-Organization writes, and every check pinned by a break', () => {
+  test.each([
+    ['crossMemberDelete', 'DELETE /v1/members/{membershipId}'],
+    ['crossTeamMemberDelete', 'DELETE /v1/teams/{teamId}/members/{membershipId}'],
+  ] as const)('%s fails the run naming the route', async (option, route) => {
+    const { results } = await run({ [option]: true })
+    const check = by(results, ISOLATION)
+    expect(check?.status).toBe('fail')
+    expect(check?.detail).toContain(route)
+  })
+
+  test.each([
+    ['silentCrossTeamWrite', 'lost its Team or its name was changed'],
+    ['silentCrossMemberWrite', 'no longer its Owner'],
+    ['revokeKeepsListed', 'still listed as pending'],
+    ['teamDeleteNotFoundForEveryone', 'could not delete their own Team'],
+  ] as const)('%s fails the run: "%s"', async (option, wording) => {
+    const { results } = await run({ [option]: true })
+    const check = by(results, ISOLATION)
+    expect(check?.status).toBe('fail')
+    expect(check?.detail).toContain(wording)
+  })
+
+  test('creating an Invitation must answer 201 exactly, as core documents', async () => {
+    const { results } = await run({ createInvitationAs200: true })
+    const created = by(results, 'create an Invitation')
+    expect(created?.status).toBe('fail')
+    expect(created?.detail).toContain('200')
+  })
+
+  test('a created Invitation must be pending', async () => {
+    const { results } = await run({ invitationNotPending: true })
+    expect(by(results, 'create an Invitation')?.status).toBe('fail')
+  })
+
+  test('a replay refused with another code fails', async () => {
+    const { results } = await run({ replayCode: 'session.invalid_token' })
+    const replay = by(results, REPLAY)
+    expect(replay?.status).toBe('fail')
+    expect(replay?.detail).toContain('session.reuse_detected')
+  })
+
+  test('the newest token of a reused session refused with an unrelated code fails', async () => {
+    const { results } = await run({ newestCode: 'auth.unauthenticated' })
+    const replay = by(results, REPLAY)
+    expect(replay?.status).toBe('fail')
+    expect(replay?.detail).toContain('session.revoked')
+  })
+
+  test('the Idempotency-Key of every write is unique to that request within the run', async () => {
+    const { stack } = await run()
+    const byKey = new Map<string, Set<string>>()
+    for (const call of stack.seen) {
+      if (call.key) {
+        byKey.set(
+          call.key,
+          (byKey.get(call.key) ?? new Set()).add(`${call.method} ${call.path} ${call.body}`)
+        )
+      }
+    }
+    expect(byKey.size).toBeGreaterThanOrEqual(8)
+    for (const requests of byKey.values()) {
+      expect(requests.size).toBe(1)
+    }
+  })
+})
+
+describe('the mailbox match is pinned', () => {
+  test('a six-digit number without the "verification code is" phrase is not a code', async () => {
+    const { results } = await run({ codes: 'other-phrase' })
+    const read = by(results, CODE_STEP)
+    expect(read?.status).toBe('fail')
+    expect(read?.detail).toContain('no six-digit code')
+  })
+
+  test('an email with another subject to the same address is ignored', async () => {
+    const { results } = await run({ extraMail: true })
+    expect(results.filter((result) => result.status !== 'pass')).toEqual([])
+  })
+
+  test('two emails with the right subject to this address are an error, not the newest', async () => {
+    const { results } = await run({ duplicateMail: true })
+    const read = by(results, CODE_STEP)
+    expect(read?.status).toBe('fail')
+    expect(read?.detail).toContain('more than one such email')
+  })
+})
+
+describe('values from a service that reach the report', () => {
+  test('core status and region are printed when plain', async () => {
+    const { results } = await run()
+    expect(by(results, 'core: GET /v1/organization with the access token')?.detail).toBe(
+      'active, local'
+    )
+  })
+
+  test.each([
+    ['coreRegion', '\u001b[2J\u001b[31mowned'],
+    ['coreStatus', 'active\nPASS everything'],
+    ['coreRegion', 'x'.repeat(33)],
+  ] as const)('%s %j is replaced by a fixed placeholder', async (option, value) => {
+    const { results } = await run({ [option]: value })
+    const report = results.map(formatResult).join('\n')
+    expect(report).not.toContain('\u001b')
+    expect(report).not.toContain('PASS everything')
+    expect(by(results, 'core: GET /v1/organization with the access token')?.detail).toContain(
+      '(unexpected value)'
+    )
+  })
+})
+
+describe('every value the run makes is registered before it is first used', () => {
+  type Call = { method: string; url: string; headers: Headers; body: string }
+  const carried = (call: Call): string[] => {
+    const body = (() => {
+      try {
+        return JSON.parse(call.body || '{}') as Record<string, unknown>
+      } catch {
+        return {}
+      }
+    })()
+    const fromBody = ['email', 'password', 'identifier', 'code', 'refreshToken'].map((name) =>
+      String(body[name] ?? '')
+    )
+    const query = new URL(call.url).searchParams.get('query')
+    return [
+      ...fromBody,
+      call.headers.get('authorization')?.replace(/^Bearer /, '') ?? '',
+      call.headers.get('x-tula-attempt') ?? '',
+      query ? query.replace(/^to:/, '') : '',
+    ].filter((value) => value.length > 5)
+  }
+  const forms = (value: string) => [value, encodeURIComponent(value)]
+
+  test('a throw on each call in turn never prints what that call carries', async () => {
+    const asCall = (input: string | URL | Request, init?: RequestInit): Call => ({
+      method: init?.method ?? 'GET',
+      url: String(input),
+      headers: new Headers(init?.headers),
+      body: typeof init?.body === 'string' ? init.body : '',
+    })
+    let total = 0
+    {
+      const stack = fakeStack()
+      const counting = (async (input: string | URL | Request, init?: RequestInit) => {
+        total++
+        return fetch(input, init)
+      }) as typeof fetch
+      await runSmoke(stack.targets, { ...fast, fetchImpl: counting })
+      stack.stop()
+    }
+    expect(total).toBeGreaterThan(50)
+    const leaked: string[] = []
+    for (let n = 1; n <= total; n++) {
+      const stack = fakeStack()
+      let count = 0
+      const failing = new Set<string>()
+      const seenValues: string[] = []
+      const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+        const call = asCall(input, init)
+        const signature = `${call.method} ${call.url} ${call.body} ${call.headers.get('authorization')}`
+        count++
+        if (count === n) {
+          failing.add(signature)
+        }
+        if (failing.has(signature)) {
+          seenValues.push(...carried(call))
+          throw new Error(
+            `reset while sending ${call.method} ${call.url} ${JSON.stringify([...call.headers])} ${call.body}`
+          )
+        }
+        return fetch(input, init)
+      }) as typeof fetch
+      const results = await runSmoke(stack.targets, { ...fast, fetchImpl })
+      stack.stop()
+      const report = results.map(formatResult).join('\n')
+      for (const value of seenValues) {
+        for (const form of forms(value)) {
+          if (report.includes(form)) {
+            leaked.push(`call ${n}`)
+          }
+        }
+      }
+    }
+    expect(leaked).toEqual([])
+  }, 300_000)
 })

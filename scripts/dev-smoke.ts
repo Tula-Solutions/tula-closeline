@@ -79,6 +79,16 @@ function errorCode(json: unknown): string | undefined {
   return code.length <= 100 && CONTRACT_CODE.test(code) ? code : NOT_A_CODE
 }
 
+/**
+ * A value from a service that is printed in the report: only a short plain word, otherwise a fixed
+ * placeholder, so a service cannot put text or terminal escapes in the report.
+ */
+function plain(value: unknown): string {
+  return typeof value === 'string' && /^[a-z0-9_-]{1,32}$/.test(value)
+    ? value
+    : '(unexpected value)'
+}
+
 /** The forms a value can take in a message: as is, URL-encoded (either case), JSON-escaped. */
 function forms(value: string): string[] {
   const encoded = encodeURIComponent(value)
@@ -129,6 +139,11 @@ export async function runSmoke(
         seen.add(value)
       }
     }
+  }
+  /** A value this run makes up: registered the moment it exists, so it can never be printed. */
+  const minted = (value: string) => {
+    remember(value)
+    return value
   }
   const hide = (message: string) => {
     let out = message
@@ -257,7 +272,12 @@ export async function runSmoke(
     await response.body?.cancel()
     return response.status === 200 && type.includes('text/html')
       ? pass()
-      : fail(`GET / answered ${response.status} ${type}`)
+      : fail(
+          `GET / answered ${response.status} ${type
+            .split(';')[0]
+            ?.replace(/[^a-z0-9/+.-]/g, '?')
+            .slice(0, 40)}`
+        )
   })
 
   await step('the mailbox is ready', async () => {
@@ -280,7 +300,10 @@ export async function runSmoke(
   await step('core refuses a request without a valid token', async () => {
     const cases: { headers: Record<string, string>; expected: string }[] = [
       { headers: {}, expected: 'auth.unauthenticated' },
-      { headers: { authorization: `Bearer ${randomHex(24)}` }, expected: 'auth.token_invalid' },
+      {
+        headers: { authorization: `Bearer ${minted(randomHex(24))}` },
+        expected: 'auth.token_invalid',
+      },
     ]
     for (const { headers, expected } of cases) {
       const found = await call('GET', `${targets.core}/v1/organization`, { headers })
@@ -397,10 +420,10 @@ export async function runSmoke(
   }
 
   const runId = randomHex(6)
-  const email = `smoke-${runId}@closeline-smoke.test`
-  const inviteeEmail = `invitee-${runId}@closeline-smoke.test`
-  const password = `${randomHex(16)}-Aa1`
-  remember(inviteeEmail)
+  const email = minted(`smoke-${runId}@closeline-smoke.test`)
+  const inviteeEmail = minted(`invitee-${runId}@closeline-smoke.test`)
+  const crossEmail = minted(`cross-${runId}@closeline-smoke.test`)
+  const password = minted(`${randomHex(16)}-Aa1`)
 
   await flow('sign up (starts, emails a code)', [], ['attempt'], async () => {
     const started = await startSignUp(email, password, `Smoke ${runId}`)
@@ -471,9 +494,7 @@ export async function runSmoke(
     if (pick(found.json, 'id') !== session.organizationId) {
       return fail('core returned an Organization other than the one in the token')
     }
-    return pass(
-      `${text(pick(found.json, 'status')) ?? 'no status'}, ${text(pick(found.json, 'region')) ?? 'no region'}`
-    )
+    return pass(`${plain(pick(found.json, 'status'))}, ${plain(pick(found.json, 'region'))}`)
   })
 
   await flow('core: GET /v1/members with the access token', ['session'], ['members'], async () => {
@@ -543,7 +564,7 @@ export async function runSmoke(
       once: true,
     })
     const id = text(pick(found.json, 'id'))
-    if (found.status !== 201 && found.status !== 200) {
+    if (found.status !== 201) {
       return fail(
         `POST /v1/invitations answered ${found.status} ${errorCode(found.json) ?? ''}`.trim()
       )
@@ -624,8 +645,8 @@ export async function runSmoke(
         return fail(firstIn.error ?? 'the first sign-in failed')
       }
       const first = firstIn.session
-      const email2 = `second-${runId}@closeline-smoke.test`
-      const password2 = `${randomHex(16)}-Aa1`
+      const email2 = minted(`second-${runId}@closeline-smoke.test`)
+      const password2 = minted(`${randomHex(16)}-Aa1`)
       const started = await startSignUp(email2, password2, `Smoke second ${runId}`)
       if (started.status !== 200 || !started.id || !started.secret) {
         return fail(`the second sign-up answered ${started.status} ${started.code ?? ''}`.trim())
@@ -762,18 +783,30 @@ export async function runSmoke(
           code: 'member.not_found',
         },
         {
+          label: 'DELETE /v1/members/{membershipId}',
+          method: 'DELETE',
+          path: `/v1/members/${firstMembers.membershipIds[0] ?? ''}`,
+          code: 'member.not_found',
+        },
+        {
+          label: 'DELETE /v1/teams/{teamId}/members/{membershipId}',
+          method: 'DELETE',
+          path: `/v1/teams/${team.id}/members/${ownMembershipId}`,
+          code: 'team.not_found',
+        },
+        {
           label: 'POST /v1/invitations with the first Organization teamId',
           method: 'POST',
           path: '/v1/invitations',
-          body: { email: `cross-${runId}@closeline-smoke.test`, role: 'rep', teamId: team.id },
+          body: { email: crossEmail, role: 'rep', teamId: team.id },
           code: 'team.not_found',
         },
       ]
-      for (const write of writes) {
+      for (const [index, write] of writes.entries()) {
         const response = await call(write.method, core(write.path), {
           headers: {
             ...other,
-            'idempotency-key': `smoke-${runId}-x-${write.method}-${write.code}`,
+            'idempotency-key': `smoke-${runId}-x${index}`,
           },
           body: write.body,
           once: true,
@@ -943,8 +976,8 @@ export function parseSmokeArgs(argv: readonly string[]): { strict: boolean } | {
 
 /**
  * The process exit code for a set of results: 1 if any step failed, else 0. With `strict`, a
- * skipped step also gives 1, so a skip cannot hide a gap; CI uses it now that the stack has a
- * local mailbox (hub issue 38).
+ * skipped step also gives 1, so a skip cannot hide a gap; it is the mode for CI once a workflow
+ * runs the stack (hub issue 38; none does yet).
  */
 export function exitCodeFor(results: readonly StepResult[], strict = false): number {
   return results.some((result) => result.status === 'fail' || (strict && result.status === 'skip'))
