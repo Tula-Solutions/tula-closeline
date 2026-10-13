@@ -22,12 +22,16 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
-      - name: Authenticate git for private tula-closeline-* dependencies
+      # Libraries are declared as git+ssh URLs and the runner has no SSH key. The repos are public,
+      # so plain https works; the token is only needed if a repo is made private again.
+      - name: Fetch tula-closeline-* dependencies over https
         env:
           TOKEN: ${{ secrets.CLOSELINE_REPO_TOKEN }}
         run: |
           if [ -n "$TOKEN" ]; then
             git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          else
+            git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
           fi
       - run: bun install --frozen-lockfile
       - run: bun run verify
