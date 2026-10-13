@@ -17,6 +17,10 @@ type FakeOptions = {
   coreOpen?: boolean
   /** Which core list ignores the Organization in the token and returns every row. */
   leak?: 'invitations' | 'members' | 'organization'
+  /** Refresh hands back the same refresh token. */
+  reuseRefreshToken?: boolean
+  /** Every access token for a user is the same string, as when two are issued in one second. */
+  sameAccessToken?: boolean
   /** The mailbox never receives the emails. */
   dropMail?: boolean
   /** Auth refuses every verification code. */
@@ -56,7 +60,7 @@ function fakeStack(options: FakeOptions = {}) {
   const error = (status: number, code: string) => json({ error: { code } }, status)
 
   const issue = (userId: string, orgId: string) => {
-    const accessToken = next('at')
+    const accessToken = options.sameAccessToken ? `at_${userId}` : next('at')
     const refreshToken = next('rt')
     sessions.set(accessToken, { orgId, userId })
     refreshOwner.set(refreshToken, userId)
@@ -157,7 +161,11 @@ function fakeStack(options: FakeOptions = {}) {
       }
       spentRefresh.add(token)
       const user = [...users.values()].find((candidate) => candidate.userId === userId)
-      return user ? json(issue(userId, user.orgId)) : error(401, 'auth.token_invalid')
+      if (!user) {
+        return error(401, 'auth.token_invalid')
+      }
+      const issued = issue(userId, user.orgId)
+      return json(options.reuseRefreshToken ? { ...issued, refreshToken: token } : issued)
     }
     if (path === '/.well-known/jwks.json') {
       return json({ keys: [{ kty: 'OKP', alg: 'EdDSA', kid: 'k' }] })
@@ -387,6 +395,21 @@ describe('runSmoke without a mailbox for auth', () => {
     expect(exitCodeFor(results)).toBe(0)
     expect(exitCodeFor(results, true)).toBe(1)
     expect(stack.seen.filter((call) => call.path === '/v1/client/sign-ups')).toHaveLength(1)
+  })
+})
+
+describe('refresh', () => {
+  test('an access token that is the same string as the last one is fine: only the refresh token must rotate', async () => {
+    const { results } = await run({ sameAccessToken: true })
+    expect(by(results, 'refresh the session')?.status).toBe('pass')
+    expect(results.filter((result) => result.status !== 'pass')).toEqual([])
+  })
+
+  test('a refresh that hands back the same refresh token fails', async () => {
+    const { results } = await run({ reuseRefreshToken: true })
+    const refresh = by(results, 'refresh the session')
+    expect(refresh?.status).toBe('fail')
+    expect(refresh?.detail).toContain('did not rotate')
   })
 })
 

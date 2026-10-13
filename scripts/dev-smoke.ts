@@ -450,8 +450,10 @@ export async function runSmoke(
         `POST /v1/client/sessions/refresh answered ${found.status} ${errorCode(found.json) ?? ''}`.trim()
       )
     }
-    if (next.accessToken === session.accessToken || next.refreshToken === session.refreshToken) {
-      return fail('refresh returned a token that was not renewed')
+    // Only the refresh token must change: an access token carries the session id and a
+    // one-second issue time, so one issued in the same second as the last is the same string.
+    if (next.refreshToken === session.refreshToken) {
+      return fail('refresh did not rotate the refresh token')
     }
     if (next.organizationId !== session.organizationId) {
       return fail('refresh changed the Organization in the session')

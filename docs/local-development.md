@@ -143,7 +143,7 @@ if any step is skipped. In a healthy stack nothing is skipped, so CI uses `--str
 | read the verification code | looks the email up in the mailbox (bounded wait) and takes the six-digit code from it |
 | verify the email code, sign in | the code is accepted; sign-in with the password gives a session |
 | core `GET /v1/organization` and `GET /v1/members` | with the access token: the Organization in the token, and exactly one member, the Owner |
-| refresh the session | the new tokens work at core; the spent refresh token is never reused |
+| refresh the session | the refresh token rotates and the new access token works at core; the spent refresh token is never reused. The access token may be the same string as the last (it holds the session id and a one-second issue time), so only the refresh token is compared |
 | create an Invitation | `POST /v1/invitations` for a new address, role `rep`, with an `Idempotency-Key` |
 | the Invitation email and its link | the email reaches the mailbox and its link points at the portal's `/sign-up` page |
 | a second sign-up cannot read the first Organization | a second, different user gets a different Organization id; `GET /v1/organization`, `/v1/members` and `/v1/invitations` with their token return nothing of the first (its Organization id, address, user ids, Invitation id), and `DELETE /v1/invitations/{id}` of the first Organization's Invitation answers `404`, leaving it pending |
