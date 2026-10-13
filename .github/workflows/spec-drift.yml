@@ -1,0 +1,158 @@
+name: spec-drift
+
+# Daily check that the portal's vendored copies of the auth and core OpenAPI documents have not
+# fallen behind their services (hub issue 44). It checks out the portal and both services at
+# `develop` side by side and runs the portal's own `bun run spec:check` against them. Every clone
+# is expected to exist here, so a `skipped:` line from the script is an error, not a pass.
+#
+# A scheduled failure also opens one hub issue labelled `needs-triage`, or updates that issue if it
+# is still open. Fix: in the portal, `bun run generate:api -- --from <auth clone>` and
+# `--core-from <core clone>`, then commit the result.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+# One run at a time, so the issue step can never race another run into a duplicate issue.
+concurrency:
+  group: spec-drift
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      report: ${{ steps.report.outputs.report }}
+    env:
+      REPOS: ${{ github.workspace }}/repos
+    steps:
+      # The repos are public, so plain checkouts need no token. A full history lets the report say
+      # how far behind a copy is, and makes `origin/develop` resolve in each clone.
+      - uses: actions/checkout@v4
+        with:
+          repository: Tula-Solutions/tula-closeline-portal
+          ref: develop
+          path: repos/tula-closeline-portal
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Tula-Solutions/tula-closeline-auth
+          ref: develop
+          path: repos/tula-closeline-auth
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: Tula-Solutions/tula-closeline-core
+          ref: develop
+          path: repos/tula-closeline-core
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      # The portal declares libraries as git+ssh URLs and the runner has no SSH key. The repos are
+      # public, so plain https works (the same rewrite as verify.yml, minus the private-repo token).
+      - name: Fetch tula-closeline-* dependencies over https
+        run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+      - name: Install the portal's dependencies
+        working-directory: repos/tula-closeline-portal
+        run: bun install --frozen-lockfile
+      - name: Compare the vendored specs with their services
+        id: report
+        working-directory: repos/tula-closeline-portal
+        run: |
+          set +e
+          bun run spec:check --siblings-dir "$REPOS" 2>&1 | tee "$RUNNER_TEMP/spec-check.log"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          problems=0
+          {
+            echo "## Vendored API specs behind their services"
+            echo
+          } > "$RUNNER_TEMP/report.md"
+
+          # Here every clone exists, so a skip means the comparison did not happen.
+          if grep -q '^skipped:' "$RUNNER_TEMP/spec-check.log"; then
+            problems=1
+            echo "- A comparison was skipped, so nothing was checked:" >> "$RUNNER_TEMP/report.md"
+            grep '^skipped:' "$RUNNER_TEMP/spec-check.log" | sed 's/^/  - /' >> "$RUNNER_TEMP/report.md"
+          fi
+
+          # Name each copy that is behind, with the commit the portal holds and the service's head.
+          for name in auth core; do
+            clone="$REPOS/tula-closeline-$name"
+            vendored=$(tr -d '[:space:]' < "openapi/$name.commit")
+            head=$(git -C "$clone" rev-parse origin/develop)
+            if [ "$vendored" != "$head" ]; then
+              problems=1
+              behind=$(git -C "$clone" rev-list --count "$vendored..$head" 2>/dev/null || echo unknown)
+              {
+                echo "- \`openapi/$name.openapi.json\` is behind \`tula-closeline-$name\`:"
+                echo "  vendored at \`$vendored\`, \`origin/develop\` is \`$head\` ($behind commits ahead)."
+              } >> "$RUNNER_TEMP/report.md"
+            fi
+          done
+
+          if [ "$status" -ne 0 ]; then
+            problems=1
+            {
+              echo
+              echo "\`bun run spec:check\` exited $status:"
+              echo
+              echo '```'
+              tail -n 40 "$RUNNER_TEMP/spec-check.log"
+              echo '```'
+            } >> "$RUNNER_TEMP/report.md"
+          fi
+
+          {
+            echo
+            echo "Refresh in the portal: \`bun run generate:api -- --from ../tula-closeline-auth --core-from ../tula-closeline-core\`, then commit the result."
+          } >> "$RUNNER_TEMP/report.md"
+
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$problems" -ne 0 ]; then
+            {
+              echo 'report<<SPEC_DRIFT_EOF'
+              cat "$RUNNER_TEMP/report.md"
+              echo 'SPEC_DRIFT_EOF'
+            } >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "All vendored specs match their services." >> "$GITHUB_STEP_SUMMARY"
+
+  # Only the scheduled run files an issue; a manual run reports in its own summary. Idempotent: the
+  # open issue with this title is edited in place, and one is created only when none is open.
+  issue:
+    needs: check
+    if: ${{ always() && needs.check.result == 'failure' && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      REPORT: ${{ needs.check.outputs.report }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      TITLE: 'Vendored API spec is behind its service'
+    steps:
+      - name: Open or update the drift issue
+        run: |
+          body=$(printf '%s\n\nLast seen by %s (hub issue 44).\n' "${REPORT:-The spec-drift check failed before it could write a report.}" "$RUN_URL")
+          existing=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+            | jq -r --arg t "$TITLE" 'map(select(.title == $t))[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body "$body"
+          else
+            gh issue create --title "$TITLE" --label needs-triage --body "$body"
+          fi
