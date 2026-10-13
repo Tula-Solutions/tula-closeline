@@ -10,7 +10,7 @@ ADR 0005 has the auth service issue the access and refresh tokens. Today auth re
 
 ## Decision
 
-1. **The refresh token lives in a cookie only the auth service receives.** Auth sets it as `HttpOnly`, `Secure`, `SameSite=Strict` and host-only (no `Domain` attribute). `HttpOnly` keeps script from reading it. Its `Path` is narrowed to auth's session routes, which limits which requests carry it; it is not isolation between services on one origin. Refresh and sign-out read it from the cookie.
+1. **The refresh token lives in a cookie only the auth service receives.** Auth sets it as `HttpOnly`, `Secure`, `SameSite=Strict` and host-only (no `Domain` attribute). `HttpOnly` keeps script from reading it. Its `Path` is narrowed to auth's session routes, which limits which requests carry it; it is not isolation between services on one origin [these two, host-only and the narrowed `Path`, are refinements of the owner's choice recorded on hub issue 41, not separate decisions]. Refresh and sign-out read it from the cookie.
 2. **The access token stays in the portal's memory** and travels as a bearer header. It is never stored in the browser.
 3. **The portal and the services are served from one origin.** The services sit under path prefixes behind the load balancer, which routes by path. Locally the portal's dev server proxies the same prefixes. Browser calls use same-origin paths, so there is no CORS and no CORS header to get wrong.
 4. **Cookie-authenticated routes check `Origin`.** Refresh and sign-out also compare the request's `Origin` header with an allow-list and refuse any other value, as a second defence beside `SameSite=Strict`. A request from a sibling subdomain is same-site, so `Strict` lets it through; the `Origin` check refuses it. What happens when `Origin` is absent is left to the implementing ticket.
@@ -33,5 +33,5 @@ Subdomains of one site (for example `app.` and `api.`) are same-site but still c
 - The known-device cookie of ADR 0014 is a separate cookie, set and verified by the lockout work (hub issue 30), not by this one.
 - How local development over plain http is handled is left to the implementing ticket. Any relaxation of `Secure` must be refused outside `ENVIRONMENT=local`.
 - Script running on the page, for example through an XSS flaw, still cannot read the refresh token but can call refresh and obtain an access token. The cookie narrows what a flaw can steal; it does not replace preventing one.
-- Several tabs refreshing at once on load must not trip reuse detection. The grace window exists for this, and the implementing ticket tests it.
+- Concurrent refreshes from several tabs holding the same cookie must not trigger reuse detection or end the session. How is left to the implementing ticket, which tests it with two concurrent refreshes.
 - Cookie sessions move auth further from tula-auth, the code it was copied from (ADR 0005).

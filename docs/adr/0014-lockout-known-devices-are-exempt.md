@@ -14,7 +14,7 @@ The lockout and per-address rate-limit counters are also held in process memory.
 
 1. **Lockout stays keyed by address for unknown devices.** An address with too many wrong passwords is locked against devices that have not signed in to it before.
 2. **A known device is not locked out by other people's wrong guesses.** A device that has signed in successfully to that account before carries a signed cookie. Sign-in from it is not refused because of lockout counted against the address.
-3. **Lockout and rate-limit state lives in Postgres**, not process memory, keyed by a keyed hash of the address (HMAC), never the address itself. Instances share it, so the budget no longer depends on how many run or when they last restarted.
+3. **Lockout and rate-limit state lives in Postgres**, not process memory, keyed by a keyed hash of the address, never the address itself. The key, where it is stored and what rotating it does to existing counters are left to the implementing ticket. Instances share it, so the budget no longer depends on how many run or when they last restarted.
 4. **Auth sets the known-device cookie on a successful sign-in and verifies it at sign-in.** Both are done by the lockout work (hub issue 30), not by the browser-session work, and the cookie is separate from the refresh cookie of ADR 0012.
 
 A known device is still limited: a bound on wrong passwords per device or per account always applies, and its size is left to the implementing ticket, as are the format and lifetime of the cookie.
