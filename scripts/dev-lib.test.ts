@@ -13,6 +13,7 @@ import {
   DEFAULT_PORTS,
   dockerEndpointProblem,
   downArgs,
+  freshSalt,
   generateSecrets,
   isPortInUse,
   LinePrefixer,
@@ -119,7 +120,7 @@ describe('secrets', () => {
 
   test('the rotation SQL sets every role to a SCRAM verifier and never contains a password', () => {
     const secrets = generateSecrets()
-    const sql = rotationSql(secrets)
+    const sql = rotationSql(secrets, freshSalt)
     for (const role of ROLES) {
       expect(sql).toMatch(
         new RegExp(
@@ -139,7 +140,7 @@ describe('secrets', () => {
       ...secrets,
       passwords: { ...secrets.passwords, closeline_core: "x'; DROP ROLE y;--" },
     }
-    expect(() => rotationSql(bad)).toThrow('not hex')
+    expect(() => rotationSql(bad, freshSalt)).toThrow('not hex')
   })
 
   test('scramVerifier follows RFC 7677: the verifier checks the RFC example client proof', () => {
@@ -164,7 +165,7 @@ describe('secrets', () => {
 
   test('a failed ALTER ROLE leaves no password for the Postgres log: the statement has only the verifier', () => {
     const secrets = generateSecrets()
-    const sql = rotationSql(secrets)
+    const sql = rotationSql(secrets, freshSalt)
     for (const value of secretValues(secrets)) {
       expect(sql).not.toContain(value)
     }

@@ -166,7 +166,7 @@ export function scramVerifier(
  * The SQL that gives each role its password for this run, as a SCRAM verifier: the clear-text
  * password is never in the statement, so it cannot reach the Postgres log. Reads only hex.
  */
-export function rotationSql(secrets: Secrets, salt: () => Buffer = () => randomBytes(16)): string {
+export function rotationSql(secrets: Secrets, salt: () => Buffer): string {
   return `${ROLES.map((role) => {
     const password = secrets.passwords[role]
     if (!/^[0-9a-f]{32,}$/.test(password)) {
@@ -174,6 +174,11 @@ export function rotationSql(secrets: Secrets, salt: () => Buffer = () => randomB
     }
     return `ALTER ROLE ${role} PASSWORD '${scramVerifier(password, salt())}';`
   }).join('\n')}\n`
+}
+
+/** A fresh 16-byte salt from the secure generator, one per role per run. */
+export function freshSalt(): Buffer {
+  return randomBytes(16)
 }
 
 /** The query `dev.ts` runs to list every role that can log in. */
@@ -763,6 +768,8 @@ export type SpawnOptions = {
   secrets: readonly string[]
   stdin?: string
   sinks?: Sinks
+  /** Aborting it stops the process (SIGTERM). */
+  signal?: AbortSignal
 }
 
 /**
@@ -775,6 +782,9 @@ export async function runCommand(
   options: SpawnOptions & { timeoutMs: number }
 ): Promise<{ code: number; timedOut: boolean }> {
   const sinks = options.sinks ?? processSinks
+  if (options.signal?.aborted) {
+    return { code: 143, timedOut: false }
+  }
   const proc = Bun.spawn({
     cmd,
     cwd: options.cwd,
@@ -788,6 +798,8 @@ export async function runCommand(
     timedOut = true
     proc.kill('SIGKILL')
   }, options.timeoutMs)
+  const onAbort = () => proc.kill('SIGTERM')
+  options.signal?.addEventListener('abort', onAbort, { once: true })
   try {
     await Promise.all([
       pumpThrough(proc.stdout, new LinePrefixer(name, sinks.out, options.secrets)),
@@ -796,14 +808,24 @@ export async function runCommand(
     return { code: await proc.exited, timedOut }
   } finally {
     clearTimeout(timer)
+    options.signal?.removeEventListener('abort', onAbort)
   }
 }
 
 /** The stdout of a short command, or undefined if it failed or ran past `timeoutMs`. */
 export async function captureCommand(
   cmd: string[],
-  options: { cwd: string; env: Record<string, string>; timeoutMs: number; stdin?: string }
+  options: {
+    cwd: string
+    env: Record<string, string>
+    timeoutMs: number
+    stdin?: string
+    signal?: AbortSignal
+  }
 ): Promise<string | undefined> {
+  if (options.signal?.aborted) {
+    return undefined
+  }
   const proc = Bun.spawn({
     cmd,
     cwd: options.cwd,
@@ -813,11 +835,14 @@ export async function captureCommand(
     stderr: 'ignore',
   })
   const timer = setTimeout(() => proc.kill('SIGKILL'), options.timeoutMs)
+  const onAbort = () => proc.kill('SIGTERM')
+  options.signal?.addEventListener('abort', onAbort, { once: true })
   try {
     const text = await new Response(proc.stdout).text()
     return (await proc.exited) === 0 ? text : undefined
   } finally {
     clearTimeout(timer)
+    options.signal?.removeEventListener('abort', onAbort)
   }
 }
 
