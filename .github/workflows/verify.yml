@@ -1,0 +1,33 @@
+name: verify
+
+# The one definition of CI for every Closeline repo. Each repo's ci.yml calls this workflow, so the
+# gate is changed here and nowhere else. It runs `bun run verify`, the same command agents and
+# people run locally.
+
+on:
+  workflow_call:
+    secrets:
+      CLOSELINE_REPO_TOKEN:
+        description: Read access to the private tula-closeline-* repos, for git dependencies.
+        required: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Authenticate git for private tula-closeline-* dependencies
+        env:
+          TOKEN: ${{ secrets.CLOSELINE_REPO_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+      - run: bun install --frozen-lockfile
+      - run: bun run verify

@@ -1,0 +1,24 @@
+{
+  "name": "tula-closeline",
+  "version": "0.0.0",
+  "description": "Closeline hub: glossary, decision records, plans, issues and the shared workflow setup",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.2",
+  "scripts": {
+    "prepare": "husky || true",
+    "check": "biome check scripts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test scripts",
+    "sync": "bash scripts/sync-shared.sh",
+    "sync:check": "bash scripts/sync-shared.sh --check",
+    "verify": "bun run check && bun run typecheck && bun run test && bash scripts/sync-shared.sh --check .",
+    "verify:changed": "bun run verify"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "bun-types": "^1.4.2",
+    "husky": "^9.1.7",
+    "typescript": "^7.0.2"
+  }
+}

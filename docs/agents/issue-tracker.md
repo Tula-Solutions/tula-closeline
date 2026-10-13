@@ -12,7 +12,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
-Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
+**One tracker for every Closeline repo.** All issues live in the hub, `Tula-Solutions/tula-closeline`, so parent issues, sub-issues and blocking edges can span repos. Inside the hub clone `gh` infers the repo. From any other `tula-closeline-*` clone, add `-R Tula-Solutions/tula-closeline` to every `gh issue` command. Each issue carries one `repo:<short>` label (`repo:hub`, `repo:contract`, `repo:db`, `repo:kit`, `repo:auth`, `repo:core`, `repo:playbook`, `repo:voice`, `repo:outbound`, `repo:portal`, `repo:infra`) naming the repo whose code it changes. Pull requests are opened in that code repo and reference the issue as `Tula-Solutions/tula-closeline#<n>`.
 
 ## Pull requests as a triage surface
 
