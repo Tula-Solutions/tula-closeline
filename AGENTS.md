@@ -5,6 +5,7 @@ The hub for Closeline. It holds no product code. It owns:
 - `GLOSSARY.md` — the domain language, synced into every repo.
 - `docs/adr/` — every decision record. Other repos have none.
 - `docs/plans/phase-N.md` — one plan per phase, each turned into a parent issue with tickets.
+- `docs/research/` — dated reports behind a decision record (vendor comparisons and the like).
 - `shared/` — the canonical workflow setup (standards, hooks, skills, reviewer agent, lint config,
   PR template), mirrored into every repo by `scripts/sync-shared.sh`.
 - `templates/` — what a new repo starts from (`scripts/new-repo.sh`).
