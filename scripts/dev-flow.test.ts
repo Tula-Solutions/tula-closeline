@@ -1,0 +1,424 @@
+import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { type FlowDeps, runDown, runUp } from './dev-flow.ts'
+import {
+  buildStackEnv,
+  captureCommand,
+  DEFAULT_PORTS,
+  freshSalt,
+  generateSecrets,
+  LOGIN_ROLES_SQL,
+  type ManagedChild,
+  runCommand,
+  type SuperviseOptions,
+  secretValues,
+} from './dev-lib.ts'
+
+const secrets = generateSecrets()
+const ALL_SECRETS = secretValues(secrets)
+const LOCAL_SOCKET = 'unix:///var/run/docker.sock'
+
+type Call = {
+  kind: 'run' | 'capture' | 'spawn'
+  name: string
+  cmd: string[]
+  secrets?: readonly string[]
+  stdin?: string
+}
+
+/** A harness with fake run/capture/spawn/supervise that records every call in order. */
+function harness(
+  options: {
+    parentEnv?: Record<string, string | undefined>
+    context?: string | undefined
+    logins?: string | undefined
+    busy?: string[]
+    siblingProblems?: string[]
+    buildEnv?: FlowDeps['buildEnv']
+    runCode?: (name: string, cmd: string[]) => number
+    superviseCode?: number
+    secrets?: typeof secrets
+  } = {}
+) {
+  const calls: Call[] = []
+  const said: string[] = []
+  const failed: string[] = []
+  let handler: (signal: string) => void = () => {}
+  let supervised = false
+  const label = (cmd: string[]) => cmd.slice(0, 3).join(' ')
+  const deps: FlowDeps = {
+    run: async (name, cmd, opts) => {
+      calls.push({ kind: 'run', name, cmd, secrets: opts.secrets, stdin: opts.stdin })
+      return { code: options.runCode?.(name, cmd) ?? 0, timedOut: false }
+    },
+    capture: async (cmd, opts) => {
+      calls.push({ kind: 'capture', name: label(cmd), cmd, stdin: opts.stdin })
+      if (cmd[1] === 'context') {
+        return 'context' in options ? options.context : LOCAL_SOCKET
+      }
+      if (opts.stdin?.includes('rolcanlogin')) {
+        return 'logins' in options
+          ? options.logins
+          : 'closeline_auth\ncloseline_core\ncloseline_owner\ncloseline_playbook\npostgres\n'
+      }
+      return ''
+    },
+    spawn: (name, cmd, opts) => {
+      calls.push({ kind: 'spawn', name, cmd, secrets: opts.secrets })
+      const child: ManagedChild = {
+        name,
+        alive: () => true,
+        kill: () => {},
+        exited: new Promise(() => {}),
+      }
+      return child
+    },
+    supervise: async (o: SuperviseOptions) => {
+      supervised = true
+      for (const service of o.services) {
+        service.spawn()
+      }
+      return options.superviseCode ?? 0
+    },
+    busy: async () => options.busy ?? [],
+    siblingProblems: () => options.siblingProblems ?? [],
+    buildEnv: options.buildEnv ?? buildStackEnv,
+    secrets: options.secrets ?? secrets,
+    salt: freshSalt,
+    subscribe: (onSignal) => {
+      handler = onSignal
+      return () => {}
+    },
+    probe: async () => ({ ok: true }),
+    waitReady: async () => undefined,
+    say: (line) => said.push(line),
+    fail: (line) => failed.push(line),
+  }
+  const context = {
+    hub: '/hub',
+    composeFile: '/hub/compose.dev.yaml',
+    root: '/clones',
+    ports: DEFAULT_PORTS,
+    parentEnv: options.parentEnv ?? { PATH: '/usr/bin' },
+    execPath: '/bin/bun',
+  }
+  return {
+    calls,
+    said,
+    failed,
+    deps,
+    context,
+    signal: (s = 'SIGINT') => handler(s),
+    supervised: () => supervised,
+  }
+}
+
+/** Names a recorded call by the step of the start-up it belongs to. */
+function stepName(call: Call): string {
+  const text = call.cmd.join(' ')
+  const sql = call.stdin ?? ''
+  const table: [boolean, string][] = [
+    [call.cmd[1] === 'context', 'context'],
+    [sql.includes('rolcanlogin'), 'logins'],
+    [sql.includes('ALTER ROLE'), 'rotate'],
+    [text.includes(' up '), 'up'],
+    [text.endsWith(' version'), 'version'],
+    [text.includes(' ps '), 'ps'],
+  ]
+  return table.find(([matches]) => matches)?.[1] ?? call.name
+}
+
+const composeCalls = (calls: Call[]) => calls.filter((call) => call.cmd[1] === 'compose')
+const rotationCalls = (calls: Call[]) => calls.filter((call) => call.stdin?.includes('ALTER ROLE'))
+
+describe('runUp order', () => {
+  test('checks Docker, then composes up, lists the login roles, rotates, migrates, then supervises', async () => {
+    const h = harness()
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    const steps = h.calls.map(stepName)
+    expect(steps.slice(0, 8)).toEqual([
+      'context',
+      'version',
+      'ps',
+      'up',
+      'logins',
+      'rotate',
+      'migrate',
+      'core',
+    ])
+    expect(h.supervised()).toBe(true)
+  })
+
+  test('the login-role query asks for rolcanlogin before any rotation SQL is sent', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    const query = h.calls.findIndex((call) => call.stdin?.includes(LOGIN_ROLES_SQL))
+    const rotate = h.calls.findIndex((call) => call.stdin?.includes('ALTER ROLE'))
+    expect(query).toBeGreaterThan(-1)
+    expect(rotate).toBeGreaterThan(query)
+  })
+
+  test('a failed login-role query returns 1 and no rotation SQL is sent, no migration, no service', async () => {
+    const h = harness({ logins: undefined })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(rotationCalls(h.calls)).toHaveLength(0)
+    expect(h.calls.some((call) => call.name === 'migrate')).toBe(false)
+    expect(h.supervised()).toBe(false)
+  })
+
+  test('a login role outside the rotation set returns 1 and no rotation SQL is sent', async () => {
+    const h = harness({ logins: 'closeline_auth\ncloseline_billing\npostgres\n' })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.failed.join('\n')).toContain('closeline_billing')
+    expect(rotationCalls(h.calls)).toHaveLength(0)
+    expect(h.supervised()).toBe(false)
+  })
+
+  test.each([
+    ['compose up', 'up', ['logins', 'rotate', 'migrate']],
+    ['the rotation', 'rotate', ['migrate']],
+    ['the migration', 'migrate', []],
+  ])(
+    'a failed %s returns 1, runs none of the later steps and starts no service',
+    async (_label, failing, later) => {
+      const h = harness({
+        runCode: (name, cmd) => (stepName({ kind: 'run', name, cmd } as Call) === failing ? 1 : 0),
+      })
+      // The rotation call carries its SQL on stdin, which runCode cannot see: match it by command.
+      const original = h.deps.run
+      h.deps.run = (name, cmd, opts) =>
+        failing === 'rotate' && opts.stdin?.includes('ALTER ROLE')
+          ? Promise.resolve({ code: 1, timedOut: false })
+          : original(name, cmd, opts)
+      expect(await runUp(h.context, h.deps)).toBe(1)
+      const seen = h.calls.map(stepName)
+      for (const step of later) {
+        expect(seen).not.toContain(step)
+      }
+      expect(h.supervised()).toBe(false)
+      expect(h.failed).toHaveLength(1)
+    }
+  )
+
+  test('port clashes and missing clones stop the run before the first compose command', async () => {
+    for (const options of [
+      { busy: ['port 3001 (auth) is already in use'] },
+      { siblingProblems: ['x is missing'] },
+    ]) {
+      const h = harness(options)
+      expect(await runUp(h.context, h.deps)).toBe(1)
+      expect(h.calls.some((call) => call.cmd.includes('up'))).toBe(false)
+    }
+  })
+
+  test('two runs send different salts for the same passwords', async () => {
+    const first = harness()
+    const second = harness()
+    await runUp(first.context, first.deps)
+    await runUp(second.context, second.deps)
+    const sql = (h: ReturnType<typeof harness>) => rotationCalls(h.calls)[0]?.stdin
+    expect(sql(first)).toBeDefined()
+    expect(sql(first)).not.toBe(sql(second))
+    expect(freshSalt().equals(freshSalt())).toBe(false)
+    expect(freshSalt()).toHaveLength(16)
+  })
+})
+
+describe('guards run before the first Docker or database command', () => {
+  test('a non-loopback database address returns 1 with no command spawned', async () => {
+    const h = harness({
+      buildEnv: (o) => {
+        const env = buildStackEnv(o)
+        return {
+          ...env,
+          migrate: { ...env.migrate, DATABASE_URL: 'postgres://u:p@db.example.com:5432/closeline' },
+        }
+      },
+    })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.calls).toEqual([])
+    expect(h.failed.join('\n')).toContain('loopback')
+  })
+
+  test('a remote Docker context returns 1 and no docker compose command is spawned', async () => {
+    const h = harness({ context: 'tcp://build.example.com:2376' })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(composeCalls(h.calls)).toHaveLength(0)
+    expect(h.failed.join('\n')).toContain('not a local unix socket')
+  })
+
+  test('DOCKER_HOST=tcp://x returns 1 before any command at all', async () => {
+    const h = harness({ parentEnv: { DOCKER_HOST: 'tcp://x:2375' } })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.calls).toEqual([])
+  })
+
+  test('an unreadable Docker context is refused, not assumed local', async () => {
+    const h = harness({ context: undefined })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(composeCalls(h.calls)).toHaveLength(0)
+  })
+})
+
+describe('runDown', () => {
+  for (const volumes of [false, true]) {
+    const flag = volumes ? '--down --volumes' : '--down'
+
+    test(`${flag} with a remote Docker context is refused and spawns no docker compose command`, async () => {
+      const h = harness({ context: 'ssh://me@remote-box' })
+      expect(await runDown(h.context, h.deps, volumes)).toBe(1)
+      expect(composeCalls(h.calls)).toHaveLength(0)
+      expect(h.calls.every((call) => call.cmd[1] === 'context')).toBe(true)
+    })
+
+    test(`${flag} with DOCKER_HOST=tcp://x is refused with no command`, async () => {
+      const h = harness({ parentEnv: { DOCKER_HOST: 'tcp://x:2375' } })
+      expect(await runDown(h.context, h.deps, volumes)).toBe(1)
+      expect(h.calls).toEqual([])
+    })
+
+    test(`${flag} on a local socket checks the endpoint first, then downs only closeline-dev`, async () => {
+      const h = harness()
+      expect(await runDown(h.context, h.deps, volumes)).toBe(0)
+      expect(h.calls[0]?.cmd[1]).toBe('context')
+      const down = h.calls.find((call) => call.cmd.includes('down'))
+      expect(down?.cmd[down.cmd.indexOf('-p') + 1]).toBe('closeline-dev')
+      expect(down?.cmd.includes('--volumes')).toBe(volumes)
+    })
+  }
+})
+
+describe('redaction reaches every step', () => {
+  test('compose up, the rotation, the migration and every service get the whole secret list', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    const steps = h.calls.filter((call) => call.kind !== 'capture')
+    const names = steps.map((call) => call.name)
+    expect(names).toEqual(['compose', 'compose', 'migrate', 'core', 'auth', 'portal'])
+    for (const call of steps) {
+      expect(call.secrets).toHaveLength(ALL_SECRETS.length)
+      expect([...(call.secrets ?? [])].sort()).toEqual([...ALL_SECRETS].sort())
+    }
+    expect(ALL_SECRETS.length).toBeGreaterThanOrEqual(6)
+  })
+})
+
+describe('signals during start-up', () => {
+  for (const step of ['compose up', 'rotation', 'migrate']) {
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+      test(`${signal} during ${step} stops that subprocess, exits non-zero and starts no service`, async () => {
+        let seen = 0
+        const h = harness()
+        // Block the first compose call for "compose up", the second (psql) for "rotation".
+        const original = h.deps.run
+        h.deps.run = async (name, cmd, opts) => {
+          const isUp = cmd.includes('up')
+          const isRotation = opts.stdin?.includes('ALTER ROLE') === true
+          const block =
+            (step === 'compose up' && isUp) ||
+            (step === 'rotation' && isRotation) ||
+            (step === 'migrate' && name === 'migrate')
+          if (!block) {
+            return original(name, cmd, { ...opts, signal: undefined })
+          }
+          seen++
+          await new Promise<void>((resolve) => {
+            setTimeout(() => h.signal(signal), 5)
+            opts.signal?.addEventListener('abort', () => resolve(), { once: true })
+          })
+          return { code: 143, timedOut: false }
+        }
+        const code = await runUp(h.context, h.deps)
+        expect(seen).toBe(1)
+        expect(code).not.toBe(0)
+        expect(h.failed).toEqual([])
+        expect(h.supervised()).toBe(false)
+        expect(h.calls.some((call) => call.kind === 'spawn')).toBe(false)
+        if (step !== 'migrate') {
+          expect(h.calls.some((call) => call.name === 'migrate')).toBe(false)
+        }
+      })
+    }
+  }
+
+  test('a signal that arrives between steps stops before the next one', async () => {
+    const h = harness()
+    const original = h.deps.run
+    h.deps.run = async (name, cmd, opts) => {
+      const result = await original(name, cmd, opts)
+      if (cmd.includes('up')) {
+        h.signal('SIGTERM')
+      }
+      return result
+    }
+    expect(await runUp(h.context, h.deps)).not.toBe(0)
+    expect(rotationCalls(h.calls)).toHaveLength(0)
+    expect(h.supervised()).toBe(false)
+  })
+
+  test('once the services run, a signal goes to the supervisor and exits 0', async () => {
+    const h = harness()
+    h.deps.supervise = async (o: SuperviseOptions) => {
+      const off = o.subscribe((signal) => {
+        h.said.push(`got ${signal}`)
+      })
+      h.signal('SIGHUP')
+      off()
+      return 0
+    }
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    expect(h.said).toContain('got SIGHUP')
+  })
+})
+
+describe('abort signal on real subprocesses', () => {
+  test('runCommand and captureCommand kill their process when the signal aborts', async () => {
+    const sleep = [process.execPath, '-e', 'await Bun.sleep(30000)']
+    const started = Date.now()
+    const controller = new AbortController()
+    setTimeout(() => controller.abort(), 100)
+    const result = await runCommand('slow', sleep, {
+      cwd: '/',
+      env: {},
+      secrets: [],
+      timeoutMs: 20_000,
+      signal: controller.signal,
+      sinks: { out: () => {}, err: () => {} },
+    })
+    expect(result.code).not.toBe(0)
+    const second = new AbortController()
+    setTimeout(() => second.abort(), 100)
+    expect(
+      await captureCommand(sleep, { cwd: '/', env: {}, timeoutMs: 20_000, signal: second.signal })
+    ).toBeUndefined()
+    expect(Date.now() - started).toBeLessThan(10_000)
+  })
+
+  test('an already aborted signal never lets the process run', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const result = await runCommand('slow', [process.execPath, '-e', 'await Bun.sleep(30000)'], {
+      cwd: '/',
+      env: {},
+      secrets: [],
+      timeoutMs: 20_000,
+      signal: controller.signal,
+      sinks: { out: () => {}, err: () => {} },
+    })
+    expect(result.code).not.toBe(0)
+  })
+})
+
+describe('package scripts', () => {
+  const scripts = (
+    JSON.parse(readFileSync(join(import.meta.dir, '..', 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>
+    }
+  ).scripts
+
+  test('dev and dev:smoke load no .env file', () => {
+    expect(scripts.dev).toContain('--no-env-file')
+    expect(scripts['dev:smoke']).toContain('--no-env-file')
+  })
+})
