@@ -52,6 +52,7 @@ export const ACCOUNT_STEPS = [
   'core: GET /v1/organization with the access token',
   'core: GET /v1/members with the access token',
   'refresh the session',
+  'refresh through the portal with its Origin',
   'create an Invitation',
   'the Invitation email and its link reach the mailbox',
   'create a Team',
@@ -616,6 +617,29 @@ export async function runSmoke(
       : fail(
           `the refreshed access token was refused at core: ${again.status} ${errorCode(again.json) ?? ''}`.trim()
         )
+  })
+
+  // The browser path: the portal calls only its own origin, its dev server proxies to auth, and
+  // auth must allow that Origin (SESSION_ALLOWED_ORIGINS), or the portal cannot load (issue 86).
+  await flow('refresh through the portal with its Origin', ['session'], [], async () => {
+    const session = state.session
+    if (!session) {
+      return fail('no session')
+    }
+    const portalOrigin = new URL(targets.portal).origin
+    const found = await call('POST', `${targets.portal}/v1/client/sessions/refresh`, {
+      headers: { origin: portalOrigin },
+      body: { refreshToken: session.refreshToken },
+      once: true,
+    })
+    const next = sessionFrom(found.json)
+    if (found.status !== 200 || !next) {
+      return fail(
+        `POST ${portalOrigin}/v1/client/sessions/refresh with Origin ${portalOrigin} answered ${found.status} ${errorCode(found.json) ?? ''}; auth needs SESSION_ALLOWED_ORIGINS=${portalOrigin}`.trim()
+      )
+    }
+    state.session = next
+    return pass('auth allows the portal origin')
   })
 
   await flow('create an Invitation', ['session'], ['invitation'], async () => {

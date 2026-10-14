@@ -1,8 +1,9 @@
 // The logic behind `bun run dev` (scripts/dev.ts) and `bun run dev:smoke` (scripts/dev-smoke.ts)
 // that can be tested without Docker: arguments, ports, secrets, environments, output handling.
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 /** The compose project name; `docker compose -p` and every volume of the dev stack carry it. */
@@ -387,6 +388,8 @@ export function buildStackEnv(options: {
       CORE_BASE_URL: where.core,
       CORE_INTERNAL_TOKEN: secrets.internalToken,
       MAIL_LOCAL_URL: where.mail,
+      // The portal's origin: without it auth answers a browser session refresh 403 auth.forbidden.
+      SESSION_ALLOWED_ORIGINS: where.portal,
     },
     core: {
       ...base,
@@ -1095,4 +1098,56 @@ export async function supervise(options: SuperviseOptions): Promise<number> {
     await stopAll(children, options.graceMs)
   }
   return exitCode
+}
+
+/** Whether a process with this pid is alive. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/**
+ * Takes the machine-wide lock a running `bun run dev` holds (a file naming its pid). Returns the
+ * holder's pid if it is alive; a lock left by a dead process is taken over.
+ */
+export function acquireStartLock(
+  path: string = join(tmpdir(), 'closeline-dev-stack.lock')
+): { held: false; release: () => void } | { held: true; pid: number } {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      writeFileSync(path, String(process.pid), { flag: 'wx' })
+      return {
+        held: false,
+        release: () => {
+          try {
+            if (readFileSync(path, 'utf8') === String(process.pid)) {
+              unlinkSync(path)
+            }
+          } catch {
+            // already gone
+          }
+        },
+      }
+    } catch {
+      let pid = Number.NaN
+      try {
+        pid = Number(readFileSync(path, 'utf8'))
+      } catch {
+        continue
+      }
+      if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) {
+        return { held: true, pid }
+      }
+      try {
+        unlinkSync(path)
+      } catch {
+        // someone else took it over first
+      }
+    }
+  }
+  return { held: true, pid: 0 }
 }

@@ -60,6 +60,11 @@ export type FlowDeps = {
   spawn: (name: string, cmd: string[], options: SpawnOptions) => ManagedChild
   supervise: (options: SuperviseOptions) => Promise<number>
   busy: (wanted: { name: string; port: number }[]) => ReturnType<typeof busyPorts>
+  /**
+   * Takes the machine-wide start-up lock. The compose project and every port are shared, and a
+   * start replaces the database role passwords, so a second start would break the first.
+   */
+  lock: () => { held: false; release: () => void } | { held: true; pid: number }
   siblingProblems: (root: string) => string[]
   buildEnv: typeof buildStackEnv
   secrets: Secrets
@@ -176,6 +181,23 @@ export async function runDown(ctx: FlowContext, deps: FlowDeps, volumes: boolean
 
 /** `bun run dev`: the whole start-up in order, then the supervised services. */
 export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
+  const lock = deps.lock()
+  if (lock.held) {
+    deps.fail(
+      `a dev stack is already running (bun run dev, pid ${lock.pid}): reuse it, or stop it first. ` +
+        'Starting a second one would replace the database passwords the first uses'
+    )
+    return 1
+  }
+  try {
+    return await runUpLocked(ctx, deps)
+  } finally {
+    lock.release()
+  }
+}
+
+/** The start-up proper, run while this process holds the lock. */
+async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
   const interrupt = interrupts(deps)
   const { abort } = interrupt
   const stopped = () => abort.signal.aborted

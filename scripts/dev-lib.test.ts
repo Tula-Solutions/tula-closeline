@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  acquireStartLock,
   assertLoopbackDatabaseUrl,
   baseChildEnv,
   buildStackEnv,
@@ -221,6 +222,18 @@ describe('buildStackEnv', () => {
     expect(env.portal.CORE_PROXY_TARGET).toBe('http://127.0.0.1:3100')
     expect(env.portal.PLAYBOOK_PROXY_TARGET).toBe('http://127.0.0.1:3003')
     expect(env.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:3002')
+  })
+
+  test('auth allows the portal origin for browser sessions, on the overridden port too', () => {
+    expect(build().auth.SESSION_ALLOWED_ORIGINS).toBe('http://127.0.0.1:3002')
+    const moved = buildStackEnv({
+      parent: {},
+      ports: resolvePorts({ CLOSELINE_DEV_PORTAL_PORT: '4402' }),
+      secrets,
+      dbDir,
+    })
+    expect(moved.auth.SESSION_ALLOWED_ORIGINS).toBe('http://127.0.0.1:4402')
+    expect(moved.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:4402')
   })
 
   test('the playbook verifies auth tokens like core and logs in as closeline_playbook', () => {
@@ -832,5 +845,34 @@ describe('force-killing a process that ignored SIGTERM', () => {
     })
     expect(out).toBeUndefined()
     expect(Date.now() - started).toBeLessThan(15_000)
+  })
+})
+
+describe('acquireStartLock', () => {
+  const file = () => join(mkdtempSync(join(tmpdir(), 'closeline-lock-')), 'dev.lock')
+
+  test('a second holder is refused while the first lives, and may take it once released', () => {
+    const path = file()
+    const first = acquireStartLock(path)
+    expect(first.held).toBe(false)
+    expect(acquireStartLock(path)).toEqual({ held: true, pid: process.pid })
+    if (!first.held) {
+      first.release()
+    }
+    const again = acquireStartLock(path)
+    expect(again.held).toBe(false)
+    if (!again.held) {
+      again.release()
+    }
+  })
+
+  test('a lock left by a dead process is taken over', () => {
+    const path = file()
+    writeFileSync(path, '2147483646')
+    const taken = acquireStartLock(path)
+    expect(taken.held).toBe(false)
+    if (!taken.held) {
+      taken.release()
+    }
   })
 })
