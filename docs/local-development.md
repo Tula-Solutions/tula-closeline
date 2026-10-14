@@ -13,6 +13,9 @@ bun run dev:smoke --strict     # as dev:smoke, but a skipped step is an error (m
 # read the emails the services send: open http://127.0.0.1:8026
 ```
 
+After a change, run the `run-check` skill (`shared/.claude/skills/run-check/SKILL.md`): it uses this
+stack, the smoke test and, for the portal, `agent-browser` to run the change for real.
+
 ## Before the first run
 
 - Docker Compose 2.17.0 or newer (the release that added `up --wait-timeout`; developed on 5.5.1)
