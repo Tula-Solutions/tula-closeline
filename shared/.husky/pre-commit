@@ -1,4 +1,13 @@
-bunx biome check --write --staged --no-errors-on-unmatched && git update-index --again
+# Biome checks only what the repo's `check` script covers (src, bench, ...), not committed `dist/`
+# or `migrations/meta/*.json`. `biome check --staged` takes no path filter, so pass the files.
+paths=$(bun -e 'const c=JSON.parse(require("fs").readFileSync("package.json","utf8")).scripts?.check??"";console.log(c.replace(/^biome check\s*/,""))')
+if [ -n "$paths" ]; then
+  # shellcheck disable=SC2086
+  staged=$(git diff --cached --name-only --diff-filter=ACMR -- $paths)
+  { [ -z "$staged" ] || echo "$staged" | xargs bunx biome check --write --no-errors-on-unmatched; } && git update-index --again
+else
+  bunx biome check --write --staged --no-errors-on-unmatched && git update-index --again
+fi
 bun run typecheck
 # Shared libraries commit their build output; `precommit:dist` rebuilds and stages it. Repos
 # without a dist do not define the script, and `--if-present` makes that a no-op.
