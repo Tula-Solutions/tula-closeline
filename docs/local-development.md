@@ -7,7 +7,7 @@ mailbox in Docker, then core, auth, the playbook and the portal from their sibli
 ```bash
 bun run dev           # compose up, migrate, start core, auth, the playbook and the portal; Ctrl-C stops the four
 bun run dev:smoke     # in another terminal: signs up and checks the running stack over HTTP
-bun run dev --down    # stop the compose containers (keeps the data)
+bun run dev --down    # stop the running stack (SIGTERM to its bun run dev, SIGKILL after 20 s), then the compose containers (keeps the data)
 bun run dev --down --volumes   # also delete the database and storage data
 bun run dev:smoke --strict     # as dev:smoke, but a skipped step is an error (meant for CI, see below)
 # read the emails the services send: open http://127.0.0.1:8026
@@ -252,4 +252,4 @@ The next `bun run dev` recreates the database, roles, queues and bucket.
   puts core on `3002` and the playbook on `3003`. This script uses auth 3001, core 3100, playbook
   3003, portal 3002.
 
-**One start at a time.** `bun run dev` takes a machine-wide lock (`closeline-dev-stack.lock` in the temp directory, holding its pid). A second start while the first lives refuses with "already running, reuse it" before touching Docker or any password, because a start replaces the database role passwords and would break the running stack. A lock left by a dead process is taken over.
+**One start at a time.** `bun run dev` takes a machine-wide lock (`closeline-dev-stack.lock` in the temp directory, holding its pid). A second start while the first lives refuses with "already running, reuse it" before touching Docker or any password, because a start replaces the database role passwords and would break the running stack. A lock left by a dead process is taken over. `bun run dev --down` signals the lock holder (SIGTERM, then SIGKILL of it and its children after 20 s), removes a stale lock, then stops compose.

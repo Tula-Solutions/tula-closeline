@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash, createHmac, pbkdf2Sync } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -35,6 +36,7 @@ import {
   secretValues,
   serviceDefinitions,
   spawnManaged,
+  stopLockHolder,
   unrotatedLoginRoles,
   waitForReady,
 } from './dev-lib.ts'
@@ -916,5 +918,88 @@ describe('acquireStartLock', () => {
     if (!taken.held) {
       taken.release()
     }
+  })
+})
+
+describe('stopLockHolder', () => {
+  const file = () => join(mkdtempSync(join(tmpdir(), 'closeline-holder-')), 'dev.lock')
+  const startOf = (pid: number) =>
+    spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' })
+      .stdout.trim()
+      .replace(/\s+/g, ' ')
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  /** A fake supervisor holding `path`: on SIGTERM it releases the lock and exits, or ignores it. */
+  async function holder(path: string, ignoreTerm: boolean) {
+    const code = ignoreTerm
+      ? `process.on('SIGTERM', () => {}); console.log('up'); setInterval(() => {}, 1000)`
+      : `import { unlinkSync } from 'node:fs'
+         process.on('SIGTERM', () => { unlinkSync(${JSON.stringify(path)}); process.exit(0) })
+         console.log('up'); setInterval(() => {}, 1000)`
+    const child = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((resolve) => child.stdout.once('data', () => resolve()))
+    const pid = child.pid ?? 0
+    writeFileSync(path, `${pid} ${startOf(pid)}`)
+    return { pid, child }
+  }
+
+  test('no lock: nothing to stop', async () => {
+    expect(await stopLockHolder(file())).toEqual({ kind: 'none' })
+  })
+
+  test('a lock of a dead process is removed', async () => {
+    const path = file()
+    writeFileSync(path, '999999 Mon Jan  1 00:00:00 2001')
+    expect(await stopLockHolder(path)).toEqual({ kind: 'stale' })
+    expect(existsSync(path)).toBe(false)
+  })
+
+  test('a live pid with another start time (pid reuse) is stale and not signalled', async () => {
+    const path = file()
+    writeFileSync(path, `${process.pid} Mon Jan  1 00:00:00 2001`)
+    expect(await stopLockHolder(path)).toEqual({ kind: 'stale' })
+    expect(existsSync(path)).toBe(false)
+  })
+
+  test('a live holder gets SIGTERM, releases the lock and exits', async () => {
+    const path = file()
+    const { pid, child } = await holder(path, false)
+    try {
+      expect(await stopLockHolder(path, { graceMs: 5000, pollMs: 20 })).toEqual({
+        kind: 'stopped',
+        pid,
+      })
+      expect(existsSync(path)).toBe(false)
+    } finally {
+      child.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('a holder that ignores SIGTERM is killed after the grace period and the lock removed', async () => {
+    const path = file()
+    const { pid, child } = await holder(path, true)
+    try {
+      expect(await stopLockHolder(path, { graceMs: 300, pollMs: 20 })).toEqual({
+        kind: 'killed',
+        pid,
+      })
+      expect(alive(pid)).toBe(false)
+      expect(existsSync(path)).toBe(false)
+    } finally {
+      child.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('an unreadable lock is reported and left alone', async () => {
+    const path = file()
+    writeFileSync(path, '')
+    expect((await stopLockHolder(path)).kind).toBe('failed')
+    expect(existsSync(path)).toBe(true)
   })
 })

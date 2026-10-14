@@ -1133,6 +1133,105 @@ function parseLock(text: string): { pid: number; start: string } | undefined {
   return match && Number.isSafeInteger(pid) && pid > 0 ? { pid, start: match[2] ?? '' } : undefined
 }
 
+/** Where the machine-wide start lock lives. */
+export const DEFAULT_LOCK_PATH = join(tmpdir(), 'closeline-dev-stack.lock')
+
+/** What {@link stopLockHolder} found and did. */
+export type HolderOutcome =
+  | { kind: 'none' }
+  | { kind: 'stale' }
+  | { kind: 'stopped'; pid: number }
+  | { kind: 'killed'; pid: number }
+  | { kind: 'failed'; reason: string }
+
+/** The pids of every descendant of `pid`, deepest last, read from `ps`. */
+function descendants(pid: number): number[] {
+  const out = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' })
+  const children = new Map<number, number[]>()
+  for (const line of out.stdout.split('\n')) {
+    const [child, parent] = line.trim().split(/\s+/).map(Number)
+    if (child !== undefined && parent !== undefined && Number.isFinite(child)) {
+      children.set(parent, [...(children.get(parent) ?? []), child])
+    }
+  }
+  const found: number[] = []
+  const queue = [pid]
+  for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+    for (const child of children.get(next) ?? []) {
+      found.push(child)
+      queue.push(child)
+    }
+  }
+  return found
+}
+
+/** Sends a signal, ignoring a process that is already gone. */
+function signalPid(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal)
+  } catch {
+    // gone
+  }
+}
+
+/**
+ * Stops the `bun run dev` that holds the start lock, for `--down`. A lock with no live holder of
+ * that start time is removed. A live holder gets SIGTERM and `graceMs` to stop its services and
+ * release the lock; if it is still there, it and everything it started are sent SIGKILL (its
+ * descendants, not its process group: the group may be the user's shell).
+ */
+export async function stopLockHolder(
+  path: string = DEFAULT_LOCK_PATH,
+  options: { graceMs?: number; pollMs?: number } = {}
+): Promise<HolderOutcome> {
+  const graceMs = options.graceMs ?? 20_000
+  const pollMs = options.pollMs ?? 100
+  let text: string
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    return { kind: 'none' }
+  }
+  const holder = parseLock(text)
+  if (!holder) {
+    return {
+      kind: 'failed',
+      reason: `the lock ${path} is empty or unreadable; delete it if nothing runs`,
+    }
+  }
+  const start = holder.start === 'unknown' ? undefined : processStart(holder.pid)
+  if (!pidAlive(holder.pid) || (start !== undefined && start !== holder.start)) {
+    rmSync(path, { force: true })
+    return { kind: 'stale' }
+  }
+  const tree = descendants(holder.pid)
+  signalPid(holder.pid, 'SIGTERM')
+  const deadline = Date.now() + graceMs
+  while (Date.now() < deadline) {
+    if (!pidAlive(holder.pid)) {
+      return { kind: 'stopped', pid: holder.pid }
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  }
+  for (const pid of [...descendants(holder.pid), ...tree, holder.pid]) {
+    signalPid(pid, 'SIGKILL')
+  }
+  for (let i = 0; i < 50 && pidAlive(holder.pid); i++) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  }
+  if (pidAlive(holder.pid)) {
+    return { kind: 'failed', reason: `pid ${holder.pid} did not die after SIGKILL` }
+  }
+  try {
+    if (readFileSync(path, 'utf8') === text) {
+      unlinkSync(path)
+    }
+  } catch {
+    // already gone
+  }
+  return { kind: 'killed', pid: holder.pid }
+}
+
 /** Waits a few milliseconds without spinning. */
 function pause(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
@@ -1147,7 +1246,7 @@ function pause(ms: number): void {
  * refusal the lock could not be taken at all.
  */
 export function acquireStartLock(
-  path: string = join(tmpdir(), 'closeline-dev-stack.lock'),
+  path: string = DEFAULT_LOCK_PATH,
   seam: { beforeTakeover?: () => void } = {}
 ): { held: false; release: () => void } | { held: true; pid?: number; path: string } {
   const mine = `${process.pid} ${processStart(process.pid) ?? 'unknown'}`

@@ -8,6 +8,7 @@ import {
   composeArgs,
   dockerEndpointProblem,
   downArgs,
+  type HolderOutcome,
   LOGIN_ROLES_SQL,
   type ManagedChild,
   migrateCommand,
@@ -65,6 +66,8 @@ export type FlowDeps = {
    * start replaces the database role passwords, so a second start would break the first.
    */
   lock: () => { held: false; release: () => void } | { held: true; pid?: number; path: string }
+  /** Stops the `bun run dev` that holds the start lock (for `--down`). */
+  stopHolder: () => Promise<HolderOutcome>
   siblingProblems: (root: string) => string[]
   buildEnv: typeof buildStackEnv
   secrets: Secrets
@@ -156,6 +159,18 @@ function interrupts(deps: FlowDeps) {
 export async function runDown(ctx: FlowContext, deps: FlowDeps, volumes: boolean): Promise<number> {
   const interrupt = interrupts(deps)
   try {
+    const holder = await deps.stopHolder()
+    if (holder.kind === 'failed') {
+      deps.fail(holder.reason)
+      return 1
+    }
+    if (holder.kind === 'stopped' || holder.kind === 'killed') {
+      deps.say(
+        holder.kind === 'stopped'
+          ? `stopped the running stack (pid ${holder.pid})`
+          : `the running stack (pid ${holder.pid}) ignored SIGTERM and was killed`
+      )
+    }
     const ready = await prepare(ctx, deps, interrupt.abort)
     if (!ready || interrupt.abort.signal.aborted) {
       return interrupt.abort.signal.aborted ? INTERRUPTED : 1
