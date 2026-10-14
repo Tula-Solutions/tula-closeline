@@ -5,7 +5,9 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.2",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -17,15 +19,16 @@
   "scripts": {
     "prepare": "husky || true",
     "build": "bunup",
-    "check": "biome check src scripts",
+    "check": "biome check src bench scripts",
+    "bench": "bun test bench",
     "typecheck": "tsc --noEmit",
     "test": "bun test src",
     "test:coverage": "bun test src --coverage",
     "dist:check": "bash scripts/dist-check.sh",
     "shared:check": "bash .claude/hooks/shared-check.sh",
     "precommit:dist": "bunup && git add dist",
-    "verify": "bun run check && bun run typecheck && bun run test:coverage && bun run dist:check && bun run shared:check",
-    "verify:changed": "biome check --changed --no-errors-on-unmatched src scripts && bun run typecheck && bun run test"
+    "verify": "bun run check && bun run typecheck && bun run test:coverage && bun run bench && bun run dist:check && bun run shared:check",
+    "verify:changed": "biome check --changed --no-errors-on-unmatched src bench scripts && bun run typecheck && bun run test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",

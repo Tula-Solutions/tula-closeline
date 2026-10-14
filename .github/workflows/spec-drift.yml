@@ -95,11 +95,11 @@ jobs:
           }
           trap finish EXIT
 
-          # The portal's `spec:check --siblings` fails when either the spec or its recorded commit
-          # hash differs, and a service merges often without touching openapi.json, so a hash
-          # difference alone must not fail this job. Decide on content here instead, and run the
-          # portal's own check without --siblings for what is left: the committed copies parse and
-          # the generated types match them.
+          # The portal's `spec:check --siblings` compares by content and reports a hash-only
+          # difference as information (`--strict-hash` makes it fail; portal PR 7). This job decides
+          # on content itself, because the portal's check reads sibling clones, not these checkouts.
+          # It then runs the portal's own check without --siblings for what is left: the committed
+          # copies parse and the generated types match them.
           bun run generate:api -- --check 2>&1 | tee "$RUNNER_TEMP/spec-check.log"
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
