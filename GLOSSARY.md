@@ -98,3 +98,7 @@ _Avoid_: Result, disposition, status (of a Deal)
 **Moment**:
 A short window of consecutive turns in a Call, kept with its Deal's Outcome so search can find similar ones. A piece of a Document is a chunk, not a Moment.
 _Avoid_: Snippet, segment, clip
+
+**Linked Google account**:
+A person's Google account tied to their Closeline sign-in, so they can sign in with Google as well as, or instead of, a password.
+_Avoid_: Google login, social login, SSO
