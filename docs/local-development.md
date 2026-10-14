@@ -222,6 +222,24 @@ The report prints no Call, Deal or import id, and no customer deal id. Each run 
 Deals and objects in the dev database and bucket (the Call is soft-deleted and purged after 30 days);
 `bun run dev --down --volumes` removes them.
 
+## Open the stack from another device
+
+A Cloudflare quick tunnel can put the portal on a public `https` address:
+
+1. Start the tunnel first: `cloudflared tunnel --url http://127.0.0.1:3002`. It prints
+   `https://<random>.trycloudflare.com`.
+2. Start the stack with that origin:
+   `CLOSELINE_DEV_PUBLIC_ORIGIN=https://<random>.trycloudflare.com bun run dev`.
+
+`CLOSELINE_DEV_PUBLIC_ORIGIN` must be exactly `https://<lower-case host>` with an optional port, no
+path, query or trailing slash; anything else is refused before anything starts. When it is set,
+auth also accepts that origin for sessions and the portal's Vite dev server allows its host. When it
+is unset nothing changes.
+
+Anyone with the link can reach the portal, so use test data only and stop the tunnel when you are
+done. The mailbox (`127.0.0.1:8026`) is not tunnelled: read the verification code on the machine
+that runs the stack.
+
 ## Reset
 
 ```bash

@@ -239,6 +239,52 @@ describe('buildStackEnv', () => {
     expect(moved.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:4402')
   })
 
+  test('without CLOSELINE_DEV_PUBLIC_ORIGIN nothing about the public origin is set', () => {
+    const env = build({ CLOSELINE_DEV_PUBLIC_ORIGIN: '' })
+    expect(env.auth.SESSION_ALLOWED_ORIGINS).toBe('http://127.0.0.1:3002')
+    expect(env.portal.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS).toBeUndefined()
+  })
+
+  test('a public origin is allowed for sessions and its host for the portal dev server', () => {
+    const env = build({ CLOSELINE_DEV_PUBLIC_ORIGIN: 'https://quiet-fox-1.trycloudflare.com' })
+    expect(env.auth.SESSION_ALLOWED_ORIGINS).toBe(
+      'http://127.0.0.1:3002,https://quiet-fox-1.trycloudflare.com'
+    )
+    expect(env.portal.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS).toBe('quiet-fox-1.trycloudflare.com')
+    expect(env.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:3002')
+  })
+
+  test('a public origin with a port keeps the port for auth and drops it for the host', () => {
+    const env = build({ CLOSELINE_DEV_PUBLIC_ORIGIN: 'https://dev.example.com:8443' })
+    expect(env.auth.SESSION_ALLOWED_ORIGINS).toBe(
+      'http://127.0.0.1:3002,https://dev.example.com:8443'
+    )
+    expect(env.portal.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS).toBe('dev.example.com')
+  })
+
+  test.each([
+    'http://a.trycloudflare.com',
+    'https://a.trycloudflare.com/app',
+    'https://a.trycloudflare.com/',
+    'https://A.trycloudflare.com',
+    'https://*.trycloudflare.com',
+    'https://a.trycloudflare.com?x=1',
+    'https://a.trycloudflare.com#x',
+    'https://user@a.trycloudflare.com',
+    'https://a.trycloudflare.com:99999x',
+    'a.trycloudflare.com',
+    'https://',
+    'https://a b.com',
+    'https://a.com:0',
+    'https://a.com:65536',
+    'https://a.com:099',
+    'https://a.com:443',
+  ])('refuses the public origin %s before anything starts', (origin) => {
+    expect(() => build({ CLOSELINE_DEV_PUBLIC_ORIGIN: origin })).toThrow(
+      'CLOSELINE_DEV_PUBLIC_ORIGIN'
+    )
+  })
+
   test('the playbook verifies auth tokens like core and logs in as closeline_playbook', () => {
     const env = build()
     expect(env.playbook.ENVIRONMENT).toBe('local')

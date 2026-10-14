@@ -14,6 +14,7 @@ import {
   parseArgs,
   probeInternalWiring,
   resolvePorts,
+  resolvePublicOrigin,
   runCommand,
   STOP_SIGNALS,
   spawnManaged,
@@ -98,6 +99,7 @@ if (import.meta.main) {
   let ports: Ports
   try {
     ports = resolvePorts(process.env)
+    resolvePublicOrigin(process.env)
   } catch (error) {
     fail(error instanceof Error ? error.message : 'bad ports')
     process.exit(2)
