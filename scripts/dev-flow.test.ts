@@ -44,6 +44,8 @@ function harness(
     secrets?: typeof secrets
     /** Another live `bun run dev` holds the start-up lock (its pid). */
     lockedBy?: number
+    /** What stopping the lock holder reports (default: no stack running). */
+    holder?: Awaited<ReturnType<FlowDeps['stopHolder']>>
   } = {}
 ) {
   const calls: Call[] = []
@@ -113,6 +115,7 @@ function harness(
             pid: Number.isNaN(options.lockedBy) ? undefined : options.lockedBy,
             path: '/tmp/x.lock',
           },
+    stopHolder: async () => options.holder ?? { kind: 'none' },
     siblingProblems: () => options.siblingProblems ?? [],
     buildEnv: options.buildEnv ?? buildStackEnv,
     secrets: options.secrets ?? secrets,
@@ -344,6 +347,43 @@ describe('runDown', () => {
       const down = h.calls.find((call) => call.cmd.includes('down'))
       expect(down?.cmd[down.cmd.indexOf('-p') + 1]).toBe('closeline-dev')
       expect(down?.cmd.includes('--volumes')).toBe(volumes)
+    })
+  }
+})
+
+describe('runDown and a running stack', () => {
+  test('stops the holder first, then compose', async () => {
+    const h = harness({ holder: { kind: 'stopped', pid: 42 } })
+    expect(await runDown(h.context, h.deps, false)).toBe(0)
+    expect(h.said.join('\n')).toMatch(/stopped the running stack \(pid 42\)/)
+    expect(h.calls.some((call) => call.cmd.includes('down'))).toBe(true)
+  })
+
+  test('a holder that cannot be stopped fails and leaves compose alone', async () => {
+    const h = harness({ holder: { kind: 'failed', reason: 'pid 42 did not die' } })
+    expect(await runDown(h.context, h.deps, false)).toBe(1)
+    expect(h.failed).toEqual(['pid 42 did not die'])
+    expect(h.calls).toEqual([])
+  })
+
+  test('holds the start lock while compose goes down, and releases it', async () => {
+    const h = harness()
+    expect(await runDown(h.context, h.deps, false)).toBe(0)
+    expect(h.released()).toBe(1)
+  })
+
+  test('refuses when a start holds the lock, and runs no compose command', async () => {
+    const h = harness({ lockedBy: 7 })
+    expect(await runDown(h.context, h.deps, false)).toBe(1)
+    expect(h.failed.join('\n')).toMatch(/start/)
+    expect(h.calls).toEqual([])
+  })
+
+  for (const kind of ['none', 'stale'] as const) {
+    test(`${kind} lock still downs compose`, async () => {
+      const h = harness({ holder: { kind } })
+      expect(await runDown(h.context, h.deps, true)).toBe(0)
+      expect(h.calls.find((call) => call.cmd.includes('--volumes'))).toBeDefined()
     })
   }
 })

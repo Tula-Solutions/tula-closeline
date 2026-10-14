@@ -17,6 +17,7 @@ import {
   runCommand,
   STOP_SIGNALS,
   spawnManaged,
+  stopLockHolder,
   supervise,
   waitForReady,
 } from './dev-lib.ts'
@@ -26,7 +27,7 @@ const hub = resolve(import.meta.dir, '..')
 const USAGE = `usage: bun run dev [--down [--volumes]]
 
   (no flags)         start the stack and the four services; Ctrl-C stops the services
-  --down             stop and remove the dev compose containers
+  --down             stop the running stack (the bun run dev process and its services), then the compose containers
   --down --volumes   also delete the dev stack's volumes (database and storage data)
 
 Environment: CLOSELINE_SIBLINGS_DIR (where the tula-closeline-* clones are, default: next to
@@ -50,6 +51,7 @@ export function createDeps(): FlowDeps {
     supervise,
     busy: busyPorts,
     lock: acquireStartLock,
+    stopHolder: () => stopLockHolder(),
     siblingProblems: (root) => checkSiblings(root),
     buildEnv: buildStackEnv,
     secrets: generateSecrets(),

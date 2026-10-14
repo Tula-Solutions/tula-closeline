@@ -8,6 +8,7 @@ import {
   composeArgs,
   dockerEndpointProblem,
   downArgs,
+  type HolderOutcome,
   LOGIN_ROLES_SQL,
   type ManagedChild,
   migrateCommand,
@@ -65,6 +66,8 @@ export type FlowDeps = {
    * start replaces the database role passwords, so a second start would break the first.
    */
   lock: () => { held: false; release: () => void } | { held: true; pid?: number; path: string }
+  /** Stops the `bun run dev` that holds the start lock (for `--down`). */
+  stopHolder: () => Promise<HolderOutcome>
   siblingProblems: (root: string) => string[]
   buildEnv: typeof buildStackEnv
   secrets: Secrets
@@ -155,7 +158,28 @@ function interrupts(deps: FlowDeps) {
 /** `--down`: stops the dev stack; with `volumes` also deletes its data. */
 export async function runDown(ctx: FlowContext, deps: FlowDeps, volumes: boolean): Promise<number> {
   const interrupt = interrupts(deps)
+  let taken: ReturnType<FlowDeps['lock']> | undefined
   try {
+    const holder = await deps.stopHolder()
+    if (holder.kind === 'failed') {
+      deps.fail(holder.reason)
+      return 1
+    }
+    if (holder.kind === 'stopped' || holder.kind === 'killed') {
+      deps.say(
+        holder.kind === 'stopped'
+          ? `stopped the running stack (pid ${holder.pid})`
+          : `the running stack (pid ${holder.pid}) ignored SIGTERM and was killed`
+      )
+    }
+    // Hold the start lock so a start cannot race `compose down`.
+    taken = deps.lock()
+    if (taken.held) {
+      deps.fail(
+        `a start is in progress (lock ${taken.path}${taken.pid === undefined ? '' : `, pid ${taken.pid}`}); try --down again once it is up`
+      )
+      return 1
+    }
     const ready = await prepare(ctx, deps, interrupt.abort)
     if (!ready || interrupt.abort.signal.aborted) {
       return interrupt.abort.signal.aborted ? INTERRUPTED : 1
@@ -175,6 +199,9 @@ export async function runDown(ctx: FlowContext, deps: FlowDeps, volumes: boolean
     }
     return code === 0 ? 0 : 1
   } finally {
+    if (taken && !taken.held) {
+      taken.release()
+    }
     interrupt.off()
   }
 }

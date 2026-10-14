@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { spawn } from 'node:child_process'
 import { createHash, createHmac, pbkdf2Sync } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -24,6 +25,7 @@ import {
   origins,
   parseArgs,
   probeInternalWiring,
+  processStart,
   ROLES,
   randomHex,
   redact,
@@ -35,6 +37,7 @@ import {
   secretValues,
   serviceDefinitions,
   spawnManaged,
+  stopLockHolder,
   unrotatedLoginRoles,
   waitForReady,
 } from './dev-lib.ts'
@@ -915,6 +918,171 @@ describe('acquireStartLock', () => {
     expect(taken.held).toBe(false)
     if (!taken.held) {
       taken.release()
+    }
+  })
+})
+
+describe('stopLockHolder', () => {
+  const file = () => join(mkdtempSync(join(tmpdir(), 'closeline-holder-')), 'dev.lock')
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  /** A fake supervisor holding `path`: on SIGTERM it releases the lock and exits, or ignores it. */
+  async function holder(path: string, ignoreTerm: boolean) {
+    const code = ignoreTerm
+      ? `process.on('SIGTERM', () => {}); console.log('up'); setInterval(() => {}, 1000)`
+      : `import { unlinkSync } from 'node:fs'
+         process.on('SIGTERM', () => { unlinkSync(${JSON.stringify(path)}); process.exit(0) })
+         console.log('up'); setInterval(() => {}, 1000)`
+    const child = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((resolve) => child.stdout.once('data', () => resolve()))
+    const pid = child.pid ?? 0
+    writeFileSync(path, `${pid} ${processStart(pid)}`)
+    return { pid, child }
+  }
+
+  test('no lock: nothing to stop', async () => {
+    expect(await stopLockHolder(file())).toEqual({ kind: 'none' })
+  })
+
+  test('a lock of a dead process is removed', async () => {
+    const path = file()
+    writeFileSync(path, '999999 Mon Jan  1 00:00:00 2001')
+    expect(await stopLockHolder(path)).toEqual({ kind: 'stale' })
+    expect(existsSync(path)).toBe(false)
+  })
+
+  test('a live pid with another start time (pid reuse) is stale and not signalled', async () => {
+    const path = file()
+    writeFileSync(path, `${process.pid} Mon Jan  1 00:00:00 2001`)
+    expect(await stopLockHolder(path)).toEqual({ kind: 'stale' })
+    expect(existsSync(path)).toBe(false)
+  })
+
+  test('a live holder gets SIGTERM, releases the lock and exits', async () => {
+    const path = file()
+    const { pid, child } = await holder(path, false)
+    try {
+      expect(await stopLockHolder(path, { graceMs: 5000, pollMs: 20 })).toEqual({
+        kind: 'stopped',
+        pid,
+      })
+      expect(existsSync(path)).toBe(false)
+    } finally {
+      child.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('a holder that ignores SIGTERM is killed after the grace period and the lock removed', async () => {
+    const path = file()
+    const { pid, child } = await holder(path, true)
+    try {
+      expect(await stopLockHolder(path, { graceMs: 300, pollMs: 20 })).toEqual({
+        kind: 'killed',
+        pid,
+      })
+      expect(alive(pid)).toBe(false)
+      expect(existsSync(path)).toBe(false)
+    } finally {
+      child.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('a snapshotted descendant whose pid now belongs to another process survives the kill', async () => {
+    const path = file()
+    const { pid, child } = await holder(path, true)
+    const bystander = spawn('sleep', ['30'], { stdio: 'ignore' })
+    try {
+      const outcome = await stopLockHolder(path, {
+        graceMs: 200,
+        pollMs: 20,
+        // pretend the bystander's pid was in the tree, recorded with a different start time
+        onSnapshot: (entries) => {
+          entries.push({ pid: bystander.pid ?? 0, start: 'Mon Jan 1 00:00:00 2001' })
+        },
+      })
+      expect(outcome.kind).toBe('killed')
+      expect(alive(pid)).toBe(false)
+      expect(alive(bystander.pid ?? 0)).toBe(true)
+    } finally {
+      child.kill('SIGKILL')
+      bystander.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('a stale lock replaced by a live one before removal is put back', async () => {
+    const path = file()
+    writeFileSync(path, '999999 Mon Jan  1 00:00:00 2001')
+    const fresh = `${process.pid} ${processStart(process.pid)}`
+    const outcome = await stopLockHolder(path, {
+      beforeRemove: () => writeFileSync(path, fresh),
+    })
+    expect(outcome).toEqual({ kind: 'stale' })
+    expect(readFileSync(path, 'utf8')).toBe(fresh)
+  })
+
+  test('a ps that fails means it cannot stop safely, and nothing is signalled', async () => {
+    const path = file()
+    const { pid, child } = await holder(path, false)
+    try {
+      const outcome = await stopLockHolder(path, { graceMs: 200, psBin: 'false' })
+      expect(outcome.kind).toBe('failed')
+      expect(alive(pid)).toBe(true)
+      expect(existsSync(path)).toBe(true)
+    } finally {
+      child.kill('SIGKILL')
+    }
+  })
+
+  test('a holder with an unknown start time is not signalled', async () => {
+    const path = file()
+    const { pid, child } = await holder(path, false)
+    writeFileSync(path, `${pid} unknown`)
+    try {
+      const outcome = await stopLockHolder(path, { graceMs: 200 })
+      expect(outcome.kind).toBe('failed')
+      expect(alive(pid)).toBe(true)
+    } finally {
+      child.kill('SIGKILL')
+    }
+  })
+
+  test('an unreadable lock is reported and left alone', async () => {
+    const path = file()
+    writeFileSync(path, '')
+    expect((await stopLockHolder(path)).kind).toBe('failed')
+    expect(existsSync(path)).toBe(true)
+  })
+})
+
+describe('processStart', () => {
+  test('is the same under two time zones and locales', () => {
+    const before = { tz: process.env.TZ, lc: process.env.LC_ALL }
+    try {
+      process.env.TZ = 'Pacific/Auckland'
+      process.env.LC_ALL = 'de_DE.UTF-8'
+      const a = processStart(process.pid)
+      process.env.TZ = 'America/Los_Angeles'
+      process.env.LC_ALL = 'ja_JP.UTF-8'
+      const b = processStart(process.pid)
+      expect(a).toBeDefined()
+      expect(a).toBe(b)
+    } finally {
+      for (const [key, value] of [
+        ['TZ', before.tz],
+        ['LC_ALL', before.lc],
+      ] as const) {
+        if (value === undefined) {
+          delete process.env[key]
+        } else {
+          process.env[key] = value
+        }
+      }
     }
   })
 })
