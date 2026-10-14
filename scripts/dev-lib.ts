@@ -333,12 +333,21 @@ export function resolvePublicOrigin(
   const port = match?.[2]
   const badPort =
     port !== undefined && (!/^[1-9][0-9]*$/.test(port) || Number(port) > 65535 || port === '443')
-  if (!match?.[1] || badPort) {
+  // The URL parser must agree, and an all-digit last label would be read as an IPv4 address.
+  const host = match?.[1]
+  const lastLabelNumeric = host !== undefined && /^[0-9]+$/.test(host.split('.').pop() ?? '')
+  let urlAgrees = false
+  try {
+    urlAgrees = new URL(raw).origin === raw
+  } catch {
+    urlAgrees = false
+  }
+  if (!host || badPort || lastLabelNumeric || !urlAgrees) {
     throw new Error(
       `CLOSELINE_DEV_PUBLIC_ORIGIN must be https://<lower-case host> with an optional port, no path, query or trailing slash (got ${JSON.stringify(raw)})`
     )
   }
-  return { origin: raw, host: match[1] }
+  return { origin: raw, host }
 }
 
 /** The origins the services are reached at, from the host. */
@@ -473,7 +482,9 @@ export function buildStackEnv(options: {
       AUTH_PROXY_TARGET: where.auth,
       CORE_PROXY_TARGET: where.core,
       PLAYBOOK_PROXY_TARGET: where.playbook,
-      // Vite blocks an unknown Host header; this is its supported way to allow the tunnel host.
+      // Vite blocks an unknown Host header. This variable is Vite-internal and undocumented,
+      // checked against Vite 8.3.4; if a Vite release drops it the tunnel fails as "Blocked
+      // request". The portal should later read its own env var into `server.allowedHosts`.
       ...(publicOrigin ? { __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: publicOrigin.host } : {}),
     },
   }

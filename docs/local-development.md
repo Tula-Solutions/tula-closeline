@@ -232,12 +232,16 @@ A Cloudflare quick tunnel can put the portal on a public `https` address:
    `CLOSELINE_DEV_PUBLIC_ORIGIN=https://<random>.trycloudflare.com bun run dev`.
 
 `CLOSELINE_DEV_PUBLIC_ORIGIN` must be exactly `https://<lower-case host>` with an optional port, no
-path, query or trailing slash; anything else is refused before anything starts. When it is set,
-auth also accepts that origin for sessions and the portal's Vite dev server allows its host. When it
-is unset nothing changes.
+path, query or trailing slash, and ASCII only (no punycode). An invalid value stops `bun run dev`
+before anything starts. When it is set, auth also accepts that origin for sessions and the portal's
+Vite dev server allows its host. When it is unset nothing changes.
 
-Anyone with the link can reach the portal, so use test data only and stop the tunnel when you are
-done. The mailbox (`127.0.0.1:8026`) is not tunnelled: read the verification code on the machine
+The host is allowed through `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, which is Vite-internal and
+undocumented. It was checked against Vite 8.3.4; if Vite drops it, the tunnel fails as "Blocked
+request".
+
+Anyone with the link reaches the portal's dev server and, through its proxy, auth, core and the
+playbook, with sign-up open. Use test data only and stop the tunnel when you are done. The mailbox (`127.0.0.1:8026`) is not tunnelled: read the verification code on the machine
 that runs the stack.
 
 ## Reset

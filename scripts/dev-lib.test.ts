@@ -279,6 +279,7 @@ describe('buildStackEnv', () => {
     'https://a.com:65536',
     'https://a.com:099',
     'https://a.com:443',
+    'https://example.1',
   ])('refuses the public origin %s before anything starts', (origin) => {
     expect(() => build({ CLOSELINE_DEV_PUBLIC_ORIGIN: origin })).toThrow(
       'CLOSELINE_DEV_PUBLIC_ORIGIN'
