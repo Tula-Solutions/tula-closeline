@@ -1,11 +1,11 @@
 # Local development
 
 One command runs the Closeline stack on your machine: Postgres 18, two local stand-ins and a local
-mailbox in Docker, then core, auth and the portal from their sibling clones. This is plan step 1.19
+mailbox in Docker, then core, auth, the playbook and the portal from their sibling clones. This is plan step 1.19
 (hub issue 20); the mailbox and the end-to-end smoke test are hub issue 38.
 
 ```bash
-bun run dev           # compose up, migrate, start core, auth and the portal; Ctrl-C stops the three
+bun run dev           # compose up, migrate, start core, auth, the playbook and the portal; Ctrl-C stops the four
 bun run dev:smoke     # in another terminal: signs up and checks the running stack over HTTP
 bun run dev --down    # stop the compose containers (keeps the data)
 bun run dev --down --volumes   # also delete the database and storage data
@@ -26,7 +26,7 @@ bun run dev:smoke --strict     # as dev:smoke, but a skipped step is an error (m
   `unix://` socket: it cannot tell a daemon on this machine from a remote one reached through a
   forwarded socket (for example `ssh -L /tmp/docker.sock:/var/run/docker.sock`), so do not point
   `DOCKER_HOST` or a context at such a socket.
-- Clone `tula-closeline-db`, `-auth`, `-core` and `-portal` next to this repo (or point
+- Clone `tula-closeline-db`, `-auth`, `-core`, `-playbook` and `-portal` next to this repo (or point
   `CLOSELINE_SIBLINGS_DIR` at the folder that holds them) and run `bun install` in each. The git
   dependencies are private; if you have no SSH key on GitHub, do the one-time `gh auth setup-git`
   and `git config --global url...insteadOf` step in any clone's `README.md` ("Getting started").
@@ -47,13 +47,14 @@ it should be, has no `node_modules`, or a port is taken.
 | Object storage stand-in: Adobe S3Mock 5.2.3 (S3 API) | `http://127.0.0.1:9090` | bucket `closeline-dev`; any credentials; path-style addressing |
 | core | `http://127.0.0.1:3100` | `bun src/server.ts` in `tula-closeline-core` |
 | auth | `http://127.0.0.1:3001` | `bun src/server.ts` in `tula-closeline-auth` |
+| playbook | `http://127.0.0.1:3003` | `bun src/server.ts` in `tula-closeline-playbook`: the API, the ingestion job loop (documents, Calls, Recordings, Deal imports) and the sweeps, all in this one process (see "The playbook" below) |
 | portal | `http://127.0.0.1:3002` | Vite dev server in `tula-closeline-portal` |
 
 Ports 5434 to 5437 are the repos' own test databases and 5432 is left for whatever else you run, so
 the dev Postgres is on 5440. Mailpit's usual port 8025 is often taken by another project's mailbox,
 so this one is on 8026. Override any port with `CLOSELINE_DEV_POSTGRES_PORT`,
 `CLOSELINE_DEV_QUEUE_PORT`, `CLOSELINE_DEV_STORAGE_PORT`, `CLOSELINE_DEV_MAIL_PORT`,
-`CLOSELINE_DEV_AUTH_PORT`, `CLOSELINE_DEV_CORE_PORT` and `CLOSELINE_DEV_PORTAL_PORT`. Every port binds to `127.0.0.1` only.
+`CLOSELINE_DEV_AUTH_PORT`, `CLOSELINE_DEV_CORE_PORT`, `CLOSELINE_DEV_PLAYBOOK_PORT` and `CLOSELINE_DEV_PORTAL_PORT`. Every port binds to `127.0.0.1` only.
 Every image is pinned to an exact version and digest in `compose.dev.yaml`.
 
 Why these stand-ins: ADR 0001 gives each Region its own queues, and the plan (steps 1.10, 1.12 and
@@ -69,9 +70,28 @@ service's default (`MAIL_LOCAL_FROM` is not set). Sign-up codes and Invitation l
 mailbox's web UI; both are secrets, so open it only on your own machine. The portal and the
 migration get no mail setting.
 
-**The queue and object storage are provisioned but nothing uses them yet.** The queue port and
-object storage port in `tula-closeline-kit` (steps 1.10 and 1.12) are not built, so no service
-has a setting for either. They are here so the first service that needs one has it.
+**The playbook** is the first service to use the queue and object storage stand-ins. It runs with
+`ENVIRONMENT=local` and gets: the `closeline_playbook` database role; `QUEUE_URL` and
+`QUEUE_ENDPOINT` for ElasticMQ (the queue `closeline-playbook`, defined in
+`scripts/dev/elasticmq.conf`, dead letters to `closeline-dev-dlq`); `STORAGE_BUCKET` and
+`STORAGE_ENDPOINT` for S3Mock (bucket `closeline-dev`); placeholder AWS credentials, because the
+SDK will not sign a request without some (both stand-ins ignore them); the same `AUTH_JWKS_URL`,
+`AUTH_ISSUER` and `AUTH_AUDIENCE` core uses; and its own internal secret
+(`INTERNAL_API_TOKENS`, generated each run and different from the one auth and core share). Its
+polling loops are set to 1 s (`INGESTION_POLL_INTERVAL_MS`, `TRANSCRIBE_POLL_INTERVAL_MS`) so a
+test does not wait on the 5 s defaults. The vector store, embedder, OCR reader and transcriber have
+no real adapter yet; the playbook runs in-process stand-ins for them and allows that only when
+`ENVIRONMENT=local`. So a Recording is "transcribed" by a scripted stand-in (four turns, two
+speakers, no Rep), not by listening to the audio, and the vectors are lost when the process stops.
+API and workers are one process: `WORKERS_ENABLED` defaults to true for `local`, and the job loop
+and the sweeps start after the server listens. To run an API-only playbook, run it by hand with
+`WORKERS_ENABLED=false`.
+
+**The portal reaches the playbook through its dev server.** The portal calls only its own origin; its
+dev server proxies `/v1/client` to auth, `/v1/organization`, `/v1/members`, `/v1/invitations` and
+`/v1/teams` to core and `/v1/playbook` to the playbook. The script gives it the three targets the
+portal reads (`AUTH_PROXY_TARGET`, `CORE_PROXY_TARGET`, `PLAYBOOK_PROXY_TARGET`, see the portal's
+`.env.example`) and no other service setting. Nothing in the portal needs to change.
 
 ## Order of a start
 
@@ -87,12 +107,12 @@ has a setting for either. They are here so the first service that needs one has 
    database once, and a test fails if a `*_PASSWORD` there has no role in the list.
 4. Runs `scripts/migrate.ts` of the `tula-closeline-db` clone as the owner role (the script its
    `db:migrate` runs, started directly with `--no-env-file`).
-5. Starts core, then auth (which calls core), then the portal, waiting for each to answer 2xx.
+5. Starts core, then auth (which calls core), then the playbook, then the portal, waiting for each to answer 2xx (`/readyz`; the playbook's checks its database).
 6. Checks the wiring: core accepts the shared internal secret and refuses a wrong one.
 
-Each child's output is prefixed (`[core]`, `[auth]`, `[portal]`) and scrubbed of this run's
+Each child's output is prefixed (`[core]`, `[auth]`, `[playbook]`, `[portal]`) and scrubbed of this run's
 secrets. If one exits, or any step after the first spawn fails, the others are stopped and the
-script exits 1. On Ctrl-C, SIGTERM or SIGHUP it stops the three services and leaves compose
+script exits 1. On Ctrl-C, SIGTERM or SIGHUP it stops the four services and leaves compose
 running, so the next start is quick. A second signal while a start-up step is still stopping kills
 that step's process (SIGKILL) instead of waiting for it, and says so; a third does nothing. Once
 the services run, signals belong to the supervisor, and a signal during shutdown prints no
@@ -112,7 +132,8 @@ never written to a file and never printed (output is also scrubbed of their valu
 
 - the passwords of the five Postgres login roles above, and
 - the internal secret auth presents to core (`CORE_INTERNAL_TOKEN` in auth, `INTERNAL_API_TOKENS`
-  in core).
+  in core), and
+- the playbook's own internal secret (`INTERNAL_API_TOKENS` in the playbook only).
 
 One value is fixed: auth's `AUTH_MASTER_KEY` is left unset, so auth uses its built-in development
 key, which it refuses outside `ENVIRONMENT=local`. It seals the signing keys stored in the
@@ -139,7 +160,7 @@ the stack and runs `bun run dev:smoke --strict`, a person runs it.
 
 | Step | What it checks |
 | --- | --- |
-| auth ready, core ready, portal served, the mailbox ready, auth publishes EdDSA signing keys | each answers |
+| auth ready, core ready, portal served, playbook ready, the mailbox ready, auth publishes EdDSA signing keys | each answers |
 | core refuses a request with no token and with a malformed one | `401 auth.unauthenticated` and `401 auth.token_invalid` |
 | sign up | `POST /v1/client/sign-ups` with a fresh `smoke-<random>@closeline-smoke.test` address (a reserved domain), a random password and an Organization name |
 | read the verification code | looks the email up in the mailbox (bounded wait) and takes the six-digit code from it. Only a message whose `To` is exactly this run's address counts (Mailpit's `to:` search is a substring match); one message holding two codes, two links or none is an error; a late email is waited for until the deadline; a mailbox that answers 5xx or not as Mailpit does is reported as a mailbox failure, not as a missing email |
@@ -150,6 +171,7 @@ the stack and runs `bun run dev:smoke --strict`, a person runs it.
 | the Invitation email and its link | the email reaches the mailbox and its link points at the portal's `/sign-up` page |
 | create a Team | `POST /v1/teams` as the first user, for the isolation checks |
 | a second sign-up cannot read the first Organization | a second, different user gets a different Organization id. Reads: `GET /v1/organization`, `/v1/members`, `/v1/invitations` and `/v1/teams` with their token return nothing of the first (its Organization id, address, user and membership ids, Invitation and Team ids). The first Organization id sent in an `x-organization-id` header or an `organizationId` query with the second token is ignored or refused. Writes by id with the second token against the first Organization (`DELETE /v1/invitations/{id}`, `PATCH` and `DELETE /v1/teams/{id}`, `POST /v1/teams/{id}/members`, `PATCH /v1/members/{id}`, `POST /v1/invitations` with its `teamId`) each answer `404` with the documented code (`invitation.not_found`, `team.not_found`, `member.not_found`), and the first Organization is unchanged. Positive control: the first user then renames and deletes their own Team and revokes their own Invitation, so a route that answers `404` to everyone fails |
+| **Sales history** (below): confirm the rights wording; upload a Transcript; the first Call created its Deal, open; the Transcript is processed into Moments; upload a Recording; the Recording is transcribed; import a three-row Deal CSV; the import is applied; the Outcome reaches the Moments; a second Organization cannot see any of it; delete the Call and it is gone | the playbook, as the Owner, through its public routes only |
 | a replayed refresh token is refused and ends its session | last, on a throwaway sign-in: refresh twice, replay the first token, expect `401 session.reuse_detected`, then expect the newest token to be refused too (the contract says reuse ends the whole session) |
 
 A step whose earlier step failed or was skipped is skipped as `blocked by "<step>" (failed)`, so one
@@ -163,6 +185,39 @@ Each run creates two users, a Team that is deleted again and a revoked Invitatio
 `bun run dev --down --volumes` removes them. The test only talks to the services' public HTTP
 routes and the mailbox, so it needs no back door in any service.
 
+### The sales-history steps
+
+They run after the isolation step, as the first user (the Owner), and sign in again before each
+phase because an access token lasts 60 s and a wait can be longer. Waits are bounded
+(`playbookWaitMs`, 90 s by default) and say what they were waiting for. In order:
+
+1. **Rights.** `GET /v1/playbook/rights-confirmation` shows the Organization unconfirmed; a Call
+   upload is refused `403 rights.confirmation_required`; `PUT` with the current wording version
+   confirms it.
+2. **A Deal** is not created by a route of its own: the first Call under a customer deal id creates
+   it, open. The smoke test uploads a small `.txt` Transcript (six turns, Rep label `Rep`), looks the
+   Deal up by `POST /v1/playbook/deals/lookup` (open) and lists the Calls of that Deal.
+3. **Moments.** It waits for the Call to reach `ready`. A Call is in search only when it is ready
+   and its Deal is won (the contract), so at this point `inSearch` must still be false.
+4. **A Recording.** A generated one-second, 8 kHz mono WAV of silence is uploaded under a second
+   Deal with no Rep, and must reach `awaiting_rep` (or `ready`). The stand-in transcriber does not
+   read the audio.
+5. **A Deal CSV** of three rows (the Transcript's Deal as won, the Recording's Deal as lost, one new
+   Deal as won) is imported. The import must complete with 3 rows, 3 applied, 0 rejected, a 3-row
+   report and three Deals; the Transcript's Deal is now won, and then (a bounded wait for the re-tag
+   job) its Call is in search.
+6. **Isolation.** A third user in a new Organization sees no rights confirmation, empty lists of
+   Calls, Deals and imports, and `404` with the documented code (`call.not_found`,
+   `deal.not_found`, `deal_import.not_found`) for every read, delete, restore, Rep change and
+   Outcome change by id, and for the Deal lookup; the first Organization's Call is unchanged.
+7. **Delete.** `DELETE` of the Transcript's Call answers `200` with state `deleted` and out of
+   search, it reads as `deleted`, it is gone from the default list, and deleting it again answers the
+   same.
+
+The report prints no Call, Deal or import id, and no customer deal id. Each run leaves its Calls,
+Deals and objects in the dev database and bucket (the Call is soft-deleted and purged after 30 days);
+`bun run dev --down --volumes` removes them.
+
 ## Reset
 
 ```bash
@@ -173,8 +228,10 @@ The next `bun run dev` recreates the database, roles, queues and bucket.
 
 ## Known gaps in the stack (found wiring it up)
 
-- **No CORS.** The portal (`:3002`) calls auth (`:3001`) and core (`:3100`) from the browser, a
-  different origin, and neither sets CORS headers: `OPTIONS /v1/client/password-policy` on auth
+- **No CORS (a proxy removes the need).** The portal now calls only its own origin and its dev
+  server proxies to the services (see "The portal reaches the playbook"), so this no longer blocks
+  it. It is kept as found: the services still send no CORS headers. A browser on another origin
+  (`:3002` calling auth `:3001` and core `:3100` directly) would be blocked: `OPTIONS /v1/client/password-policy` on auth
   answers `404 request.not_found`, and `OPTIONS /v1/organization` on core `401
   auth.unauthenticated`, with no `Access-Control-Allow-Origin`. The portal's `README.md` says so;
   until the services allow the portal's origin or a proxy serves all three on one origin, the
@@ -183,6 +240,10 @@ The next `bun run dev` recreates the database, roles, queues and bucket.
   `iss=http://localhost:<PORT>` (`tula-closeline-auth` `src/env.ts` `publicUrl`); core's default
   `AUTH_ISSUER` is `http://127.0.0.1:3001` (`tula-closeline-core` `src/env.ts` `LOCAL_AUTH_ORIGIN`).
   This script sets both to `http://127.0.0.1:3001`.
+- **The Deal's `callCount` is always 0** (`tula-closeline-playbook`, `src/modules/deal/schema.ts`
+  `toDeal` sets `callCount: 0` with a comment that Calls do not exist yet). The smoke test lists
+  the Deal's Calls instead of reading it.
 - **Port conventions disagree.** Every `.env.example` says `PORT=3000`; auth's example puts core on
   `3100`, core's defaults put auth on `3001` and the portal on `3002`, and the portal's example
-  puts core on `3002`. This script uses auth 3001, core 3100, portal 3002.
+  puts core on `3002` and the playbook on `3003`. This script uses auth 3001, core 3100, playbook
+  3003, portal 3002.

@@ -182,6 +182,16 @@ describe('runUp order', () => {
     expect(h.supervised()).toBe(true)
   })
 
+  test('starts the playbook after the migration, from the playbook clone, with its own environment', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    const migrate = h.calls.findIndex((call) => call.name === 'migrate')
+    const playbook = h.calls.findIndex((call) => call.kind === 'spawn' && call.name === 'playbook')
+    expect(playbook).toBeGreaterThan(migrate)
+    expect(h.calls[playbook]?.cmd).toEqual([h.context.execPath, '--no-env-file', 'src/server.ts'])
+    expect(h.said.some((line) => line.includes('127.0.0.1:3003'))).toBe(true)
+  })
+
   test('the login-role query asks for rolcanlogin before any rotation SQL is sent', async () => {
     const h = harness()
     await runUp(h.context, h.deps)
@@ -327,12 +337,12 @@ describe('redaction reaches every step', () => {
     await runUp(h.context, h.deps)
     const steps = h.calls.filter((call) => call.kind !== 'capture')
     const names = steps.map((call) => call.name)
-    expect(names).toEqual(['compose', 'compose', 'migrate', 'core', 'auth', 'portal'])
+    expect(names).toEqual(['compose', 'compose', 'migrate', 'core', 'auth', 'playbook', 'portal'])
     for (const call of steps) {
       expect(call.secrets).toHaveLength(ALL_SECRETS.length)
       expect([...(call.secrets ?? [])].sort()).toEqual([...ALL_SECRETS].sort())
     }
-    expect(ALL_SECRETS.length).toBeGreaterThanOrEqual(6)
+    expect(ALL_SECRETS.length).toBeGreaterThanOrEqual(7)
   })
 })
 
@@ -626,10 +636,15 @@ describe('ports of a stack that is partly up', () => {
     expect(asked).not.toContain('object storage stand-in')
   })
 
-  test('a stack that is fully up has no compose port checked, only the three services', async () => {
+  test('a stack that is fully up has no compose port checked, only the four services', async () => {
     const h = harness({ running: every })
     await runUp(h.context, h.deps)
-    expect(h.busyAsked.map((wanted) => wanted.name).sort()).toEqual(['auth', 'core', 'portal'])
+    expect(h.busyAsked.map((wanted) => wanted.name).sort()).toEqual([
+      'auth',
+      'core',
+      'playbook',
+      'portal',
+    ])
   })
 
   test('a clean start checks all four compose ports', async () => {

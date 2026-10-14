@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { COMPOSE_PROJECT, DEFAULT_PORTS, ROLES } from './dev-lib.ts'
+import { COMPOSE_PROJECT, DEFAULT_PORTS, PLAYBOOK_QUEUE, ROLES, STORAGE_BUCKET } from './dev-lib.ts'
 
 const file = join(import.meta.dir, '..', 'compose.dev.yaml')
 const text = readFileSync(file, 'utf8')
@@ -114,5 +114,19 @@ describe('compose.dev.yaml', () => {
         expect(text).toMatch(new RegExp(`^  ${source}:`, 'm'))
       }
     }
+  })
+})
+
+describe('the playbook dev stack', () => {
+  const queueConf = readFileSync(join(import.meta.dir, 'dev', 'elasticmq.conf'), 'utf8')
+
+  test('the queue stand-in defines the queue the playbook is given as QUEUE_URL', () => {
+    expect(queueConf).toMatch(new RegExp(`^\\s*${PLAYBOOK_QUEUE}\\s*\\{`, 'm'))
+  })
+
+  test('the bucket the playbook is given exists in the object storage stand-in', () => {
+    const buckets =
+      compose.services.storage?.environment?.COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS
+    expect(String(buckets).split(',')).toContain(STORAGE_BUCKET)
   })
 })

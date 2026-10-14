@@ -5,7 +5,13 @@ import { formatResult, runSmoke, type StepResult } from './dev-smoke.ts'
 import { type FakeOptions, fakeStack } from './dev-smoke-fake.ts'
 
 const by = (results: StepResult[], name: string) => results.find((result) => result.name === name)
-const fast = { timeoutMs: 1_000, mailWaitMs: 400, mailIntervalMs: 20 }
+const fast = {
+  timeoutMs: 1_000,
+  mailWaitMs: 400,
+  mailIntervalMs: 20,
+  playbookWaitMs: 400,
+  playbookIntervalMs: 10,
+}
 const ISOLATION = 'a second sign-up cannot read the first Organization'
 const REPLAY = 'a replayed refresh token is refused and ends its session'
 const CODE_STEP = 'read the verification code from the mailbox'

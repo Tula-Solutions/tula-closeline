@@ -9,7 +9,7 @@ import { join } from 'node:path'
 export const COMPOSE_PROJECT = 'closeline-dev'
 
 /** The sibling clones the stack runs from, by short name. */
-export const SIBLINGS = ['db', 'auth', 'core', 'portal'] as const
+export const SIBLINGS = ['db', 'auth', 'core', 'playbook', 'portal'] as const
 
 /** The short name of a sibling clone (`tula-closeline-<short>`). */
 export type Sibling = (typeof SIBLINGS)[number]
@@ -22,6 +22,7 @@ export type Ports = {
   mail: number
   auth: number
   core: number
+  playbook: number
   portal: number
 }
 
@@ -33,6 +34,7 @@ export const DEFAULT_PORTS: Ports = {
   mail: 8026,
   auth: 3001,
   core: 3100,
+  playbook: 3003,
   portal: 3002,
 }
 
@@ -43,6 +45,7 @@ const PORT_VARIABLES: Record<keyof Ports, string> = {
   mail: 'CLOSELINE_DEV_MAIL_PORT',
   auth: 'CLOSELINE_DEV_AUTH_PORT',
   core: 'CLOSELINE_DEV_CORE_PORT',
+  playbook: 'CLOSELINE_DEV_PLAYBOOK_PORT',
   portal: 'CLOSELINE_DEV_PORTAL_PORT',
 }
 
@@ -130,6 +133,8 @@ export type Secrets = {
   passwords: Record<Role, string>
   /** The bearer secret auth presents to core's internal routes. */
   internalToken: string
+  /** The bearer secret the playbook accepts on its internal routes. */
+  playbookToken: string
 }
 
 /** Fresh secrets from a cryptographically secure generator (32 random bytes each). */
@@ -138,12 +143,16 @@ export function generateSecrets(random: (size: number) => Buffer = randomBytes):
   for (const role of ROLES) {
     passwords[role] = randomHex(32, random)
   }
-  return { passwords, internalToken: randomHex(32, random) }
+  return {
+    passwords,
+    internalToken: randomHex(32, random),
+    playbookToken: randomHex(32, random),
+  }
 }
 
 /** Every secret value, for {@link redact}. */
 export function secretValues(secrets: Secrets): string[] {
-  return [...Object.values(secrets.passwords), secrets.internalToken]
+  return [...Object.values(secrets.passwords), secrets.internalToken, secrets.playbookToken]
 }
 
 const SCRAM_ITERATIONS = 4096
@@ -288,10 +297,17 @@ export function baseChildEnv(parent: Record<string, string | undefined>): Record
   return env
 }
 
+/** The queue the playbook reads, defined in `scripts/dev/elasticmq.conf`. */
+export const PLAYBOOK_QUEUE = 'closeline-playbook'
+
+/** The bucket the object storage stand-in creates (`compose.dev.yaml`). */
+export const STORAGE_BUCKET = 'closeline-dev'
+
 /** The origins the services are reached at, from the host. */
 export function origins(ports: Ports): {
   auth: string
   core: string
+  playbook: string
   portal: string
   mail: string
 } {
@@ -299,6 +315,7 @@ export function origins(ports: Ports): {
     mail: `http://127.0.0.1:${ports.mail}`,
     auth: `http://127.0.0.1:${ports.auth}`,
     core: `http://127.0.0.1:${ports.core}`,
+    playbook: `http://127.0.0.1:${ports.playbook}`,
     portal: `http://127.0.0.1:${ports.portal}`,
   }
 }
@@ -311,6 +328,7 @@ export type StackEnv = {
   migrate: Record<string, string>
   auth: Record<string, string>
   core: Record<string, string>
+  playbook: Record<string, string>
   portal: Record<string, string>
 }
 
@@ -382,11 +400,35 @@ export function buildStackEnv(options: {
       PORTAL_BASE_URL: where.portal,
       MAIL_LOCAL_URL: where.mail,
     },
+    playbook: {
+      ...base,
+      ...common,
+      PORT: String(ports.playbook),
+      DATABASE_URL: databaseUrl('closeline_playbook', secrets, ports, host),
+      AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
+      AUTH_ISSUER: where.auth,
+      AUTH_AUDIENCE: 'closeline',
+      INTERNAL_API_TOKENS: secrets.playbookToken,
+      // The queue and object storage stand-ins of the compose file. They ignore the credentials,
+      // but the AWS SDK will not sign a request without some.
+      AWS_REGION: 'us-east-1',
+      AWS_ACCESS_KEY_ID: 'local',
+      AWS_SECRET_ACCESS_KEY: 'local',
+      QUEUE_URL: `http://127.0.0.1:${ports.queue}/000000000000/${PLAYBOOK_QUEUE}`,
+      QUEUE_ENDPOINT: `http://127.0.0.1:${ports.queue}`,
+      STORAGE_BUCKET,
+      STORAGE_ENDPOINT: `http://127.0.0.1:${ports.storage}`,
+      // Faster loops than the defaults, so the smoke test does not wait for a poll.
+      INGESTION_POLL_INTERVAL_MS: '1000',
+      TRANSCRIBE_POLL_INTERVAL_MS: '1000',
+    },
     portal: {
       ...base,
       VITE_ENVIRONMENT: 'local',
-      VITE_AUTH_BASE_URL: where.auth,
-      VITE_CORE_BASE_URL: where.core,
+      // The portal's dev server proxies /v1/... to these: the browser calls only its own origin.
+      AUTH_PROXY_TARGET: where.auth,
+      CORE_PROXY_TARGET: where.core,
+      PLAYBOOK_PROXY_TARGET: where.playbook,
     },
   }
 }
@@ -524,16 +566,16 @@ export function checkSiblings(root: string, needed: readonly Sibling[] = SIBLING
 
 /** What the stack runs besides the compose services, in start order. */
 export type ServiceDefinition = {
-  name: 'auth' | 'core' | 'portal'
+  name: 'auth' | 'core' | 'playbook' | 'portal'
   sibling: Sibling
   /** The command, run from the clone. `--no-env-file` keeps a stray `.env` out of the process. */
   cmd: string[]
-  env: keyof Pick<StackEnv, 'auth' | 'core' | 'portal'>
+  env: keyof Pick<StackEnv, 'auth' | 'core' | 'playbook' | 'portal'>
   /** The URL that answers 2xx when the service is ready. */
   readyUrl: string
 }
 
-/** The three processes `dev.ts` starts. `bun` is the path of the running Bun. */
+/** The four processes `dev.ts` starts. `bun` is the path of the running Bun. */
 export function serviceDefinitions(bun: string, ports: Ports): ServiceDefinition[] {
   const where = origins(ports)
   return [
@@ -550,6 +592,15 @@ export function serviceDefinitions(bun: string, ports: Ports): ServiceDefinition
       cmd: [bun, '--no-env-file', 'src/server.ts'],
       env: 'auth',
       readyUrl: `${where.auth}/readyz`,
+    },
+    {
+      // The API and the workers are one process: it starts its job loop and sweeps itself
+      // (WORKERS_ENABLED defaults to true for ENVIRONMENT=local).
+      name: 'playbook',
+      sibling: 'playbook',
+      cmd: [bun, '--no-env-file', 'src/server.ts'],
+      env: 'playbook',
+      readyUrl: `${where.playbook}/readyz`,
     },
     {
       name: 'portal',

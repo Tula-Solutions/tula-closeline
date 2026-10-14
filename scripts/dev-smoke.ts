@@ -15,7 +15,13 @@ export type StepStatus = 'pass' | 'fail' | 'skip'
 export type StepResult = { name: string; status: StepStatus; detail: string }
 
 /** Where the services and the mailbox answer. */
-export type SmokeTargets = { auth: string; core: string; portal: string; mail: string }
+export type SmokeTargets = {
+  auth: string
+  core: string
+  playbook: string
+  portal: string
+  mail: string
+}
 
 /** Tunables of a run; the defaults are what the CLI uses. */
 export type SmokeOptions = {
@@ -26,6 +32,10 @@ export type SmokeOptions = {
   mailWaitMs?: number
   /** Pause between looks at the mailbox. */
   mailIntervalMs?: number
+  /** Longest to wait for a Call or a Deal import to be processed. */
+  playbookWaitMs?: number
+  /** Pause between looks at a Call or a Deal import. */
+  playbookIntervalMs?: number
 }
 
 const MAX_BODY_CHARS = 65_536
@@ -48,6 +58,48 @@ export const ACCOUNT_STEPS = [
   'a second sign-up cannot read the first Organization',
   'a replayed refresh token is refused and ends its session',
 ] as const
+
+/** The names of the sales-history steps, in the order they run (they need the signed-in Owner). */
+export const SALES_HISTORY_STEPS = [
+  'confirm the rights wording',
+  'upload a Transcript',
+  'the first Call created its Deal, open',
+  'the Transcript is processed into Moments, not yet in search',
+  'upload a Recording',
+  'the Recording is transcribed',
+  'import a three-row Deal CSV',
+  'the import is applied and the Deal has its Outcome',
+  'the Outcome reaches the Moments and the Call is in search',
+  'a second Organization cannot see any of the sales history',
+  'delete the Call and it is gone',
+] as const
+
+/** Bytes of a one-second, 8 kHz, mono, 16-bit PCM WAV of silence: the smallest real Recording. */
+export function silentWav(seconds = 1): Uint8Array<ArrayBuffer> {
+  const rate = 8000
+  const data = rate * seconds * 2
+  const bytes = new Uint8Array(44 + data)
+  const view = new DataView(bytes.buffer)
+  const ascii = (at: number, value: string) => {
+    for (let i = 0; i < value.length; i++) {
+      view.setUint8(at + i, value.charCodeAt(i))
+    }
+  }
+  ascii(0, 'RIFF')
+  view.setUint32(4, 36 + data, true)
+  ascii(8, 'WAVE')
+  ascii(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, rate, true)
+  view.setUint32(28, rate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  ascii(36, 'data')
+  view.setUint32(40, data, true)
+  return bytes
+}
 
 /** An object's property, or undefined for anything that is not an object. */
 function pick(value: unknown, ...path: string[]): unknown {
@@ -121,6 +173,13 @@ type State = {
   members?: { userIds: string[]; membershipIds: string[] }
   invitation?: { id: string; email: string }
   team?: { id: string; name: string }
+  rights?: true
+  transcript?: { id: string; dealId: string; dealRecordId: string }
+  dealOpen?: true
+  transcriptReady?: true
+  recording?: { id: string }
+  dealImport?: { id: string }
+  hidden?: true
 }
 
 /**
@@ -278,6 +337,12 @@ export async function runSmoke(
             ?.replace(/[^a-z0-9/+.-]/g, '?')
             .slice(0, 40)}`
         )
+  })
+
+  await step('playbook is ready', async () => {
+    const response = await request(`${targets.playbook}/readyz`)
+    await response.body?.cancel()
+    return response.status === 200 ? pass() : fail(`GET /readyz answered ${response.status}`)
   })
 
   await step('the mailbox is ready', async () => {
@@ -894,6 +959,563 @@ export async function runSmoke(
       )
     }
   )
+
+  // The sales history, as the Owner: rights, a Transcript, a Recording and a Deal CSV, all through
+  // the playbook's public routes, then a second Organization that must see none of it. An access
+  // token lasts 60 s and a wait can be longer, so each phase signs in again.
+  const playbook = (path: string) => `${targets.playbook}${path}`
+  const salesIds: string[] = []
+  const dealId = minted(`smoke-${runId}-a`)
+  const dealIdLost = minted(`smoke-${runId}-b`)
+  const dealIdThird = minted(`smoke-${runId}-c`)
+  const waitMs = options.playbookWaitMs ?? 90_000
+  const idle = options.playbookIntervalMs ?? 500
+  const statusOf = (response: { status: number; json: unknown }) =>
+    `${response.status} ${errorCode(response.json) ?? ''}`.trim()
+
+  /** A fresh Owner session, or why there is none. */
+  const owner = async (): Promise<{ session: Session } | { problem: string }> => {
+    const signedIn = await signIn(email, password)
+    return 'error' in signedIn
+      ? { problem: `the sign-in for the sales history failed: ${signedIn.error}` }
+      : { session: signedIn.session }
+  }
+
+  /** One multipart upload, sent once. Text fields go before the file, as the playbook requires. */
+  const upload = async (
+    path: string,
+    session: Session,
+    fields: Record<string, string>,
+    file: { name: string; type: string; bytes: string | Uint8Array<ArrayBuffer> },
+    key: string
+  ) => {
+    const form = new FormData()
+    for (const [name, value] of Object.entries(fields)) {
+      form.append(name, value)
+    }
+    form.append('file', new File([file.bytes], file.name, { type: file.type }))
+    const response = await request(playbook(path), {
+      method: 'POST',
+      idempotent: false,
+      headers: { ...authed(session), 'idempotency-key': key },
+      body: form,
+    })
+    return { status: response.status, json: await readJson(response) }
+  }
+
+  /** Reads `path` as the Owner (signing in again when the token is old) until `done` or the wait ends. */
+  const waitFor = async (
+    path: string,
+    done: (json: unknown) => 'yes' | 'no' | { failed: string }
+  ): Promise<{ json: unknown } | { problem: string }> => {
+    const deadline = Date.now() + waitMs
+    let current = await owner()
+    let signedAt = Date.now()
+    for (;;) {
+      if ('problem' in current) {
+        return current
+      }
+      if (Date.now() - signedAt > 40_000) {
+        current = await owner()
+        signedAt = Date.now()
+        continue
+      }
+      const found = await call('GET', playbook(path), { headers: authed(current.session) })
+      if (found.status !== 200) {
+        return {
+          problem: `GET ${path.replace(/[a-z]+_[0-9a-f]{32}/g, '{id}')} answered ${statusOf(found)}`,
+        }
+      }
+      const verdict = done(found.json)
+      if (verdict === 'yes') {
+        return { json: found.json }
+      }
+      if (verdict !== 'no') {
+        return { problem: verdict.failed }
+      }
+      if (Date.now() >= deadline) {
+        return { problem: `not finished within ${Math.round(waitMs / 1000)} s` }
+      }
+      await Bun.sleep(idle)
+    }
+  }
+
+  await flow('confirm the rights wording', ['session'], ['rights'], async () => {
+    const who = await owner()
+    if ('problem' in who) {
+      return fail(who.problem)
+    }
+    const headers = authed(who.session)
+    const before = await call('GET', playbook('/v1/playbook/rights-confirmation'), { headers })
+    const version = pick(before.json, 'currentWordingVersion')
+    if (before.status !== 200 || typeof version !== 'number') {
+      return fail(`GET /v1/playbook/rights-confirmation answered ${statusOf(before)}`)
+    }
+    if (pick(before.json, 'confirmed') !== false) {
+      return fail('a new Organization already has a rights confirmation')
+    }
+    const refused = await upload(
+      '/v1/playbook/calls',
+      who.session,
+      { dealId, rep: JSON.stringify({ by: 'speaker', label: 'Rep' }) },
+      { name: 'call.txt', type: 'text/plain', bytes: 'Rep: hello\nProspect: hi\n' },
+      `smoke-${runId}-norights`
+    )
+    if (refused.status !== 403 || errorCode(refused.json) !== 'rights.confirmation_required') {
+      return fail(
+        `a Call upload before the confirmation answered ${statusOf(refused)}, not 403 rights.confirmation_required`
+      )
+    }
+    const put = await call('PUT', playbook('/v1/playbook/rights-confirmation'), {
+      headers,
+      body: { wordingVersion: version },
+    })
+    if (put.status !== 200 || pick(put.json, 'confirmed') !== true) {
+      return fail(`PUT /v1/playbook/rights-confirmation answered ${statusOf(put)}`)
+    }
+    state.rights = true
+    return pass(`wording version ${version}`)
+  })
+
+  await flow('upload a Transcript', ['rights'], ['transcript'], async () => {
+    const who = await owner()
+    if ('problem' in who) {
+      return fail(who.problem)
+    }
+    const transcriptText = [
+      'Rep: Thanks for taking the time today.',
+      'Prospect: Happy to, we are looking at tools for our team.',
+      'Rep: What is the biggest problem you want to solve?',
+      'Prospect: Onboarding takes too long and the price worries me.',
+      'Rep: Understood, let me show how others cut that in half.',
+      'Prospect: That would help, send me a proposal.',
+      '',
+    ].join('\n')
+    const sent = await upload(
+      '/v1/playbook/calls',
+      who.session,
+      { dealId, rep: JSON.stringify({ by: 'speaker', label: 'Rep' }) },
+      { name: 'smoke-call.txt', type: 'text/plain', bytes: transcriptText },
+      `smoke-${runId}-transcript`
+    )
+    const id = text(pick(sent.json, 'id'))
+    const record = text(pick(sent.json, 'dealRecordId'))
+    if (sent.status !== 201 || !id || !record) {
+      return fail(`POST /v1/playbook/calls answered ${statusOf(sent)}`)
+    }
+    if (pick(sent.json, 'kind') !== 'transcript' || pick(sent.json, 'state') !== 'uploaded') {
+      return fail(
+        `the new Call is ${plain(pick(sent.json, 'kind'))} in state ${plain(pick(sent.json, 'state'))}`
+      )
+    }
+    remember(id, record)
+    salesIds.push(id, record)
+    state.transcript = { id, dealId, dealRecordId: record }
+    return pass()
+  })
+
+  await flow('the first Call created its Deal, open', ['transcript'], ['dealOpen'], async () => {
+    const who = await owner()
+    const first = state.transcript
+    if ('problem' in who || !first) {
+      return fail('problem' in who ? who.problem : 'no Transcript')
+    }
+    const found = await call('POST', playbook('/v1/playbook/deals/lookup'), {
+      headers: authed(who.session),
+      body: { dealId: first.dealId },
+    })
+    if (found.status !== 200 || pick(found.json, 'id') !== first.dealRecordId) {
+      return fail(`POST /v1/playbook/deals/lookup answered ${statusOf(found)}`)
+    }
+    const outcome = pick(found.json, 'outcome')
+    if (outcome !== 'open') {
+      return fail(`the new Deal is ${plain(outcome)}, not open`)
+    }
+    // The Deal's own callCount is not read: the Calls of the Deal are listed instead.
+    const listed = await call(
+      'GET',
+      playbook(`/v1/playbook/calls?dealRecordId=${first.dealRecordId}`),
+      { headers: authed(who.session) }
+    )
+    const items = pick(listed.json, 'items')
+    if (
+      listed.status !== 200 ||
+      !Array.isArray(items) ||
+      items.length !== 1 ||
+      pick(items[0], 'id') !== first.id
+    ) {
+      return fail(`the Deal does not list the Call: ${statusOf(listed)}`)
+    }
+    state.dealOpen = true
+    return pass()
+  })
+
+  await flow(
+    'the Transcript is processed into Moments, not yet in search',
+    ['transcript'],
+    ['transcriptReady'],
+    async () => {
+      const first = state.transcript
+      if (!first) {
+        return fail('no Transcript')
+      }
+      const done = await waitFor(`/v1/playbook/calls/${first.id}`, (json) => {
+        const state_ = pick(json, 'state')
+        if (state_ === 'failed') {
+          return { failed: `the Call failed: ${plain(pick(json, 'failureReason'))}` }
+        }
+        return state_ === 'ready' ? 'yes' : 'no'
+      })
+      if ('problem' in done) {
+        return fail(done.problem)
+      }
+      // The contract: a Call is in search only when it is ready and its Deal is won.
+      if (pick(done.json, 'inSearch') !== false) {
+        return fail('the Call of an open Deal is in search')
+      }
+      state.transcriptReady = true
+      return pass('ready; its Deal is open, so it is not in search')
+    }
+  )
+
+  await flow('upload a Recording', ['rights'], ['recording'], async () => {
+    const who = await owner()
+    if ('problem' in who) {
+      return fail(who.problem)
+    }
+    const sent = await upload(
+      '/v1/playbook/calls',
+      who.session,
+      { dealId: dealIdLost },
+      { name: 'smoke-call.wav', type: 'audio/wav', bytes: silentWav() },
+      `smoke-${runId}-recording`
+    )
+    const id = text(pick(sent.json, 'id'))
+    if (sent.status !== 201 || !id) {
+      return fail(`POST /v1/playbook/calls (Recording) answered ${statusOf(sent)}`)
+    }
+    if (pick(sent.json, 'kind') !== 'recording') {
+      return fail('the new Call is not a Recording')
+    }
+    remember(id)
+    salesIds.push(id)
+    state.recording = { id }
+    return pass()
+  })
+
+  await flow('the Recording is transcribed', ['recording'], [], async () => {
+    const recording = state.recording
+    if (!recording) {
+      return fail('no Recording')
+    }
+    const done = await waitFor(`/v1/playbook/calls/${recording.id}`, (json) => {
+      const state_ = pick(json, 'state')
+      if (state_ === 'failed') {
+        return { failed: `the Recording failed: ${plain(pick(json, 'failureReason'))}` }
+      }
+      return state_ === 'awaiting_rep' || state_ === 'ready' ? 'yes' : 'no'
+    })
+    return 'problem' in done ? fail(done.problem) : pass(plain(pick(done.json, 'state')))
+  })
+
+  await flow('import a three-row Deal CSV', ['rights', 'transcript'], ['dealImport'], async () => {
+    const who = await owner()
+    const first = state.transcript
+    if ('problem' in who || !first) {
+      return fail('problem' in who ? who.problem : 'no Transcript')
+    }
+    const csv = [
+      'deal_id,outcome,closed_at,amount,currency,name',
+      `${dealId},won,2025-01-15,1200.50,USD,Smoke won`,
+      `${dealIdLost},lost,2025-02-01,300,USD,Smoke lost`,
+      `${dealIdThird},won,2025-03-10,,,`,
+      '',
+    ].join('\n')
+    const sent = await upload(
+      '/v1/playbook/deal-imports',
+      who.session,
+      {},
+      { name: 'smoke-deals.csv', type: 'text/csv', bytes: csv },
+      `smoke-${runId}-import`
+    )
+    const id = text(pick(sent.json, 'id'))
+    if (sent.status !== 202 || !id) {
+      return fail(`POST /v1/playbook/deal-imports answered ${statusOf(sent)}`)
+    }
+    remember(id)
+    salesIds.push(id)
+    state.dealImport = { id }
+    return pass()
+  })
+
+  await flow(
+    'the import is applied and the Deal has its Outcome',
+    ['dealImport', 'transcript'],
+    [],
+    async () => {
+      const imported = state.dealImport
+      const first = state.transcript
+      if (!imported || !first) {
+        return fail('no import')
+      }
+      const done = await waitFor(`/v1/playbook/deal-imports/${imported.id}`, (json) => {
+        const state_ = pick(json, 'state')
+        if (state_ === 'failed') {
+          return { failed: `the import failed: ${plain(pick(json, 'failureReason'))}` }
+        }
+        return state_ === 'completed' ? 'yes' : 'no'
+      })
+      if ('problem' in done) {
+        return fail(done.problem)
+      }
+      const counts = ['rowCount', 'appliedCount', 'rejectedCount'].map((key) =>
+        pick(done.json, key)
+      )
+      if (counts.join() !== '3,3,0') {
+        return fail(
+          `the import counted rows/applied/rejected as ${counts.map((c) => (typeof c === 'number' ? c : '?')).join('/')}, not 3/3/0`
+        )
+      }
+      const who = await owner()
+      if ('problem' in who) {
+        return fail(who.problem)
+      }
+      const headers = authed(who.session)
+      const rows = await call('GET', playbook(`/v1/playbook/deal-imports/${imported.id}/rows`), {
+        headers,
+      })
+      const items = pick(rows.json, 'items')
+      if (rows.status !== 200 || !Array.isArray(items) || items.length !== 3) {
+        return fail(
+          `GET /v1/playbook/deal-imports/{id}/rows answered ${statusOf(rows)} with ${Array.isArray(items) ? items.length : 'no'} rows, not 3`
+        )
+      }
+      const found = await call('POST', playbook('/v1/playbook/deals/lookup'), {
+        headers,
+        body: { dealId: first.dealId },
+      })
+      if (
+        found.status !== 200 ||
+        pick(found.json, 'outcome') !== 'won' ||
+        pick(found.json, 'appearedInImport') !== true
+      ) {
+        return fail(
+          `the Deal of the Transcript is ${plain(pick(found.json, 'outcome'))} after the import, not won`
+        )
+      }
+      const listed = await call('GET', playbook('/v1/playbook/deals?limit=100'), { headers })
+      const deals = pick(listed.json, 'items')
+      if (listed.status !== 200 || !Array.isArray(deals) || deals.length !== 3) {
+        return fail(
+          `the Deal list holds ${Array.isArray(deals) ? deals.length : 'no'} Deals, not 3`
+        )
+      }
+      return pass('3 rows applied, 0 rejected; the Transcript Deal is won')
+    }
+  )
+
+  await flow(
+    'the Outcome reaches the Moments and the Call is in search',
+    ['transcriptReady', 'dealImport', 'transcript'],
+    [],
+    async () => {
+      const first = state.transcript
+      if (!first) {
+        return fail('no Transcript')
+      }
+      const done = await waitFor(`/v1/playbook/calls/${first.id}`, (json) =>
+        pick(json, 'inSearch') === true ? 'yes' : 'no'
+      )
+      return 'problem' in done
+        ? fail(`the Call of a won Deal did not reach search: ${done.problem}`)
+        : pass('the re-tag job ran; ready and won, so in search')
+    }
+  )
+
+  await flow(
+    'a second Organization cannot see any of the sales history',
+    ['transcript', 'dealImport', 'recording'],
+    ['hidden'],
+    async () => {
+      const first = state.transcript
+      const imported = state.dealImport
+      const recording = state.recording
+      if (!first || !imported || !recording) {
+        return fail('missing the first Organization sales history')
+      }
+      const email2 = minted(`sales-${runId}@closeline-smoke.test`)
+      const password2 = minted(`${randomHex(16)}-Aa1`)
+      const started = await startSignUp(email2, password2, `Smoke sales ${runId}`)
+      if (started.status !== 200 || !started.id || !started.secret) {
+        return fail(
+          `the sign-up for the sales check answered ${started.status} ${started.code ?? ''}`.trim()
+        )
+      }
+      const mailed = await mailbox(email2, 'verification code')
+      if (!mailed.ok) {
+        return unread(mailed, 'verification')
+      }
+      const found = codeIn(mailed.text)
+      if ('problem' in found) {
+        return fail(`the sign-up for the sales check: ${found.problem}`)
+      }
+      remember(found.code)
+      const verified = await verify({ id: started.id, secret: started.secret }, found.code)
+      if (verified.status !== 200) {
+        return fail(
+          `the sales-check verify answered ${verified.status} ${verified.code ?? ''}`.trim()
+        )
+      }
+      const second = await signIn(email2, password2)
+      if ('error' in second) {
+        return fail(second.error ?? 'the sales-check sign-in failed')
+      }
+      const other = authed(second.session)
+      const firstIds = [...salesIds, dealId, dealIdLost, dealIdThird]
+      const leaks = (json: unknown) => {
+        const body = JSON.stringify(json) ?? ''
+        return firstIds.filter((value) => body.includes(value))
+      }
+
+      // Its own rights are not confirmed: the first Organization's confirmation does not carry over.
+      const rights = await call('GET', playbook('/v1/playbook/rights-confirmation'), {
+        headers: other,
+      })
+      if (rights.status !== 200 || pick(rights.json, 'confirmed') !== false) {
+        return fail('the second Organization shows a rights confirmation it never made')
+      }
+      const lists = {
+        'GET /v1/playbook/calls': '/v1/playbook/calls',
+        'GET /v1/playbook/deals': '/v1/playbook/deals',
+        'GET /v1/playbook/deal-imports': '/v1/playbook/deal-imports',
+      }
+      for (const [label, path] of Object.entries(lists)) {
+        const listed = await call('GET', playbook(path), { headers: other })
+        const items = pick(listed.json, 'items')
+        if (listed.status !== 200 || !Array.isArray(items)) {
+          return fail(`${label} answered ${statusOf(listed)} for the second Organization`)
+        }
+        if (items.length > 0 || leaks(listed.json).length > 0) {
+          return fail(`${label} returned sales history of the first Organization`)
+        }
+      }
+      const deleted = await call('GET', playbook('/v1/playbook/calls?state=deleted'), {
+        headers: other,
+      })
+      if (leaks(deleted.json).length > 0) {
+        return fail('the list of deleted Calls returned a Call of the first Organization')
+      }
+      const byId: [string, string, string, string, unknown?][] = [
+        ['GET', `/v1/playbook/calls/${first.id}`, 'call.not_found', 'a Transcript'],
+        ['GET', `/v1/playbook/calls/${recording.id}`, 'call.not_found', 'a Recording'],
+        ['DELETE', `/v1/playbook/calls/${first.id}`, 'call.not_found', 'delete a Call'],
+        ['POST', `/v1/playbook/calls/${first.id}/restore`, 'call.not_found', 'restore a Call'],
+        [
+          'PUT',
+          `/v1/playbook/calls/${first.id}/rep`,
+          'call.not_found',
+          'change a Rep',
+          { rep: { by: 'speaker', label: 'Prospect' } },
+        ],
+        ['GET', `/v1/playbook/deals/${first.dealRecordId}`, 'deal.not_found', 'a Deal'],
+        [
+          'PUT',
+          `/v1/playbook/deals/${first.dealRecordId}/outcome`,
+          'deal.not_found',
+          'set an Outcome',
+          { outcome: 'lost' },
+        ],
+        ['GET', `/v1/playbook/deal-imports/${imported.id}`, 'deal_import.not_found', 'an import'],
+        [
+          'GET',
+          `/v1/playbook/deal-imports/${imported.id}/rows`,
+          'deal_import.not_found',
+          'an import report',
+        ],
+      ]
+      for (const [method, path, code, what, body] of byId) {
+        const response = await call(method, playbook(path), {
+          headers: other,
+          body,
+          once: method !== 'GET',
+        })
+        if (response.status !== 404 || errorCode(response.json) !== code) {
+          return fail(
+            `reaching ${what} of the first Organization answered ${statusOf(response)}, not 404 ${code}`
+          )
+        }
+      }
+      const lookup = await call('POST', playbook('/v1/playbook/deals/lookup'), {
+        headers: other,
+        body: { dealId },
+      })
+      if (lookup.status !== 404 || errorCode(lookup.json) !== 'deal.not_found') {
+        return fail(
+          `looking up the Deal of the first Organization answered ${statusOf(lookup)}, not 404 deal.not_found`
+        )
+      }
+      // Positive control: the first Organization's data is still all there and unchanged.
+      const again = await owner()
+      if ('problem' in again) {
+        return fail(again.problem)
+      }
+      const still = await call('GET', playbook(`/v1/playbook/calls/${first.id}`), {
+        headers: authed(again.session),
+      })
+      if (still.status !== 200 || pick(still.json, 'state') === 'deleted') {
+        return fail('the first Call changed or went missing during the second Organization checks')
+      }
+      state.hidden = true
+      return pass(
+        'lists empty; every id answered 404 with its documented code; the first is unchanged'
+      )
+    }
+  )
+
+  await flow('delete the Call and it is gone', ['transcript', 'hidden'], [], async () => {
+    const who = await owner()
+    const first = state.transcript
+    if ('problem' in who || !first) {
+      return fail('problem' in who ? who.problem : 'no Transcript')
+    }
+    const headers = authed(who.session)
+    const removed = await call('DELETE', playbook(`/v1/playbook/calls/${first.id}`), {
+      headers,
+      once: true,
+    })
+    if (
+      removed.status !== 200 ||
+      pick(removed.json, 'state') !== 'deleted' ||
+      pick(removed.json, 'inSearch') !== false
+    ) {
+      return fail(
+        `DELETE /v1/playbook/calls/{id} answered ${statusOf(removed)} and the Call is not deleted and out of search`
+      )
+    }
+    const read = await call('GET', playbook(`/v1/playbook/calls/${first.id}`), { headers })
+    if (read.status !== 200 || pick(read.json, 'state') !== 'deleted') {
+      return fail(
+        `the Call reads as ${plain(pick(read.json, 'state'))} after the delete, not deleted`
+      )
+    }
+    const listed = await call('GET', playbook('/v1/playbook/calls?limit=100'), { headers })
+    const items = pick(listed.json, 'items')
+    if (
+      listed.status !== 200 ||
+      !Array.isArray(items) ||
+      items.some((item) => pick(item, 'id') === first.id)
+    ) {
+      return fail('the deleted Call is still in the list of Calls')
+    }
+    const again = await call('DELETE', playbook(`/v1/playbook/calls/${first.id}`), {
+      headers,
+      once: true,
+    })
+    if (again.status !== 200 || pick(again.json, 'state') !== 'deleted') {
+      return fail('deleting a deleted Call again did not answer 200 deleted')
+    }
+    return pass('state deleted, out of search and out of the list')
+  })
 
   // Last, on a session made only for this: reusing a refresh token may end the whole session.
   await flow(
