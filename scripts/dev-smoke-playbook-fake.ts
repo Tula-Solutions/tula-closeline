@@ -41,6 +41,8 @@ export type PlaybookFakeOptions = {
   crossDelete?: boolean
   /** The Deal lookup finds the Deals of every Organization. */
   crossLookup?: boolean
+  /** The Call, Deal and import lists always answer with no items. */
+  emptyLists?: boolean
 }
 
 type Call = {
@@ -205,7 +207,8 @@ export function createPlaybookFake(
           ? call.deleted
           : !call.deleted || options.deletedStaysListed || options.deleteKeeps
       )
-      return json({ items: shown.map(publicCall), nextCursor: null })
+      const none = options.emptyLists && dealRecordId === null
+      return json({ items: none ? [] : shown.map(publicCall), nextCursor: null })
     }
     const callMatch = /^\/v1\/playbook\/calls\/([^/]+)(\/restore|\/rep)?$/.exec(pathname)
     if (callMatch) {
@@ -234,7 +237,10 @@ export function createPlaybookFake(
     }
 
     if (pathname === '/v1/playbook/deals' && method === 'GET') {
-      return json({ items: mine(deals).map(publicDeal), nextCursor: null })
+      return json({
+        items: options.emptyLists ? [] : mine(deals).map(publicDeal),
+        nextCursor: null,
+      })
     }
     if (pathname === '/v1/playbook/deals/lookup' && method === 'POST') {
       const body = (await request.json()) as { dealId?: string }
@@ -268,7 +274,9 @@ export function createPlaybookFake(
     }
     if (pathname === '/v1/playbook/deal-imports' && method === 'GET') {
       return json({
-        items: mine(imports).map((item) => ({ id: item.id, state: 'completed' })),
+        items: options.emptyLists
+          ? []
+          : mine(imports).map((item) => ({ id: item.id, state: 'completed' })),
         nextCursor: null,
       })
     }

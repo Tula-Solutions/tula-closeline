@@ -1012,6 +1012,9 @@ export async function runSmoke(
     let current = await owner()
     let signedAt = Date.now()
     for (;;) {
+      if (Date.now() >= deadline) {
+        return { problem: `not finished within ${Math.round(waitMs / 1000)} s` }
+      }
       if ('problem' in current) {
         return current
       }
@@ -1032,9 +1035,6 @@ export async function runSmoke(
       }
       if (verdict !== 'no') {
         return { problem: verdict.failed }
-      }
-      if (Date.now() >= deadline) {
-        return { problem: `not finished within ${Math.round(waitMs / 1000)} s` }
       }
       await Bun.sleep(idle)
     }
@@ -1384,19 +1384,66 @@ export async function runSmoke(
       if (rights.status !== 200 || pick(rights.json, 'confirmed') !== false) {
         return fail('the second Organization shows a rights confirmation it never made')
       }
-      const lists = {
-        'GET /v1/playbook/calls': '/v1/playbook/calls',
-        'GET /v1/playbook/deals': '/v1/playbook/deals',
-        'GET /v1/playbook/deal-imports': '/v1/playbook/deal-imports',
+      // The second Organization owns a Deal, a Call and an import of its own, so a list that always
+      // answers empty cannot pass: each must show its own and none of the first's.
+      const ownDealId = minted(`smoke-${runId}-own`)
+      const confirmedOwn = await call('PUT', playbook('/v1/playbook/rights-confirmation'), {
+        headers: other,
+        body: { wordingVersion: pick(rights.json, 'currentWordingVersion') },
+      })
+      if (confirmedOwn.status !== 200) {
+        return fail(
+          `the second Organization could not confirm its rights: ${statusOf(confirmedOwn)}`
+        )
       }
-      for (const [label, path] of Object.entries(lists)) {
+      const ownCall = await upload(
+        '/v1/playbook/calls',
+        second.session,
+        { dealId: ownDealId, rep: JSON.stringify({ by: 'speaker', label: 'Rep' }) },
+        {
+          name: 'own-call.txt',
+          type: 'text/plain',
+          bytes: 'Rep: hello there\nProspect: hi, go on\n',
+        },
+        `smoke-${runId}-own-call`
+      )
+      const ownCallId = text(pick(ownCall.json, 'id'))
+      const ownDealRecord = text(pick(ownCall.json, 'dealRecordId'))
+      const ownImport = await upload(
+        '/v1/playbook/deal-imports',
+        second.session,
+        {},
+        {
+          name: 'own-deals.csv',
+          type: 'text/csv',
+          bytes: `deal_id,outcome,closed_at,amount,currency\n${ownDealId}-csv,won,,,\n`,
+        },
+        `smoke-${runId}-own-import`
+      )
+      const ownImportId = text(pick(ownImport.json, 'id'))
+      if (ownCall.status !== 201 || !ownCallId || !ownDealRecord) {
+        return fail(`the second Organization own Call upload answered ${statusOf(ownCall)}`)
+      }
+      if (ownImport.status !== 202 || !ownImportId) {
+        return fail(`the second Organization own import upload answered ${statusOf(ownImport)}`)
+      }
+      remember(ownCallId, ownDealRecord, ownImportId)
+      const lists: [string, string, string][] = [
+        ['GET /v1/playbook/calls', '/v1/playbook/calls', ownCallId],
+        ['GET /v1/playbook/deals', '/v1/playbook/deals', ownDealRecord],
+        ['GET /v1/playbook/deal-imports', '/v1/playbook/deal-imports', ownImportId],
+      ]
+      for (const [label, path, own] of lists) {
         const listed = await call('GET', playbook(path), { headers: other })
         const items = pick(listed.json, 'items')
         if (listed.status !== 200 || !Array.isArray(items)) {
           return fail(`${label} answered ${statusOf(listed)} for the second Organization`)
         }
-        if (items.length > 0 || leaks(listed.json).length > 0) {
+        if (leaks(listed.json).length > 0) {
           return fail(`${label} returned sales history of the first Organization`)
+        }
+        if (!items.some((item) => pick(item, 'id') === own)) {
+          return fail(`${label} does not list the second Organization's own item`)
         }
       }
       const deleted = await call('GET', playbook('/v1/playbook/calls?state=deleted'), {
@@ -1467,7 +1514,7 @@ export async function runSmoke(
       }
       state.hidden = true
       return pass(
-        'lists empty; every id answered 404 with its documented code; the first is unchanged'
+        'its own items listed and none of the first; every id answered 404 with its documented code; the first is unchanged'
       )
     }
   )

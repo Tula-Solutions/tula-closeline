@@ -77,14 +77,14 @@ describe('the sales-history steps against a healthy playbook', () => {
       stack.stop()
     }
     const calls = parts.filter((part) => part.path === '/v1/playbook/calls')
-    // The refused try before the rights are confirmed, the Transcript and the Recording.
-    expect(calls).toHaveLength(3)
+    // The refused try, the Transcript, the Recording and the second Organization own Call.
+    expect(calls).toHaveLength(4)
     for (const part of calls) {
       expect(part.names.at(-1)).toBe('file')
       expect(part.names).toContain('dealId')
     }
     expect(calls[1]?.names).toEqual(['dealId', 'rep', 'file'])
-    expect(parts.filter((part) => part.path === '/v1/playbook/deal-imports')).toHaveLength(1)
+    expect(parts.filter((part) => part.path === '/v1/playbook/deal-imports')).toHaveLength(2)
     const keys = parts.map((part) => part.key)
     expect(new Set(keys).size).toBe(keys.length)
     expect(keys.every((key) => key !== null && key.length >= 16)).toBe(true)
@@ -229,5 +229,45 @@ describe('a playbook that is broken is noticed', () => {
     expect(upload?.status).toBe('skip')
     expect(upload?.detail).toContain('blocked by "confirm the rights wording" (failed)')
     expect(exitCodeFor(results, true)).toBe(1)
+  })
+})
+
+describe('review follow-ups', () => {
+  test('lists that always answer empty fail the second Organization check', async () => {
+    const detail = await failsAt(
+      { emptyLists: true },
+      'a second Organization cannot see any of the sales history'
+    )
+    expect(detail).toContain('own')
+  })
+
+  test('a wait that is past its deadline stops before another look', async () => {
+    const stack = fakeStack({ playbook: { transcriptStuck: true } })
+    try {
+      let okReads = 0
+      const counting = (async (input: string | Request | URL, init?: RequestInit) => {
+        const response = await fetch(input, init)
+        const path = new URL(String(input)).pathname
+        if ((init?.method ?? 'GET') === 'GET' && /^\/v1\/playbook\/calls\/call_/.test(path)) {
+          if (response.status === 200) {
+            okReads += 1
+          }
+        }
+        return response
+      }) as typeof fetch
+      const results = await runSmoke(stack.targets, {
+        ...fast,
+        playbookWaitMs: 0,
+        fetchImpl: counting,
+      })
+      const found = by(results, 'the Transcript is processed into Moments, not yet in search')
+      expect(found?.status).toBe('fail')
+      expect(found?.detail).toContain('not finished within')
+      // Only the two plain reads (the unchanged check and the read after the delete) may succeed;
+      // before the fix each of the three waits also read once before giving up.
+      expect(okReads).toBeLessThanOrEqual(2)
+    } finally {
+      stack.stop()
+    }
   })
 })

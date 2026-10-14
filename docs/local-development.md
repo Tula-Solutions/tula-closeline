@@ -206,8 +206,8 @@ phase because an access token lasts 60 s and a wait can be longer. Waits are bou
    Deal as won) is imported. The import must complete with 3 rows, 3 applied, 0 rejected, a 3-row
    report and three Deals; the Transcript's Deal is now won, and then (a bounded wait for the re-tag
    job) its Call is in search.
-6. **Isolation.** A third user in a new Organization sees no rights confirmation, empty lists of
-   Calls, Deals and imports, and `404` with the documented code (`call.not_found`,
+6. **Isolation.** A third user in a new Organization (with its own Call, Deal and import) sees no rights confirmation it did not make, lists that hold its own items and none of the first, and
+   `404`s with the documented code (`call.not_found`,
    `deal.not_found`, `deal_import.not_found`) for every read, delete, restore, Rep change and
    Outcome change by id, and for the Deal lookup; the first Organization's Call is unchanged.
 7. **Delete.** `DELETE` of the Transcript's Call answers `200` with state `deleted` and out of
