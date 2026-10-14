@@ -1,3 +1,4 @@
+import './test-guard.ts'
 import { describe, expect, test } from 'bun:test'
 import {
   exitCodeFor,

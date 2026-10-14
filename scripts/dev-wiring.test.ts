@@ -1,3 +1,4 @@
+import './test-guard.ts'
 import { describe, expect, test } from 'bun:test'
 import {
   chmodSync,
@@ -22,14 +23,6 @@ import {
 } from './dev-lib.ts'
 
 const hub = resolve(import.meta.dir, '..')
-
-// This file runs the real `--down` flow, which stops whoever holds the default lock. If the
-// preload (bunfig.toml, read only from the hub root) did not run, refuse to run a single test.
-if (!process.env.CLOSELINE_TEST_TMPDIR || tmpdir() !== process.env.CLOSELINE_TEST_TMPDIR) {
-  throw new Error(
-    'run these tests from the hub root (bun test scripts): the TMPDIR preload is missing'
-  )
-}
 
 describe('the real effects wired in dev.ts', () => {
   test('the salt source is the secure one: 16 bytes, different every call', () => {

@@ -1,3 +1,4 @@
+import './test-guard.ts'
 import { describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { createHash, createHmac, pbkdf2Sync } from 'node:crypto'
