@@ -10,7 +10,9 @@ Anything this reveals is a finding: fix it test-first, like a review finding.
 
 1. **Start the stack.** From the hub clone (`../tula-closeline`): `bun run dev`. Docker must be
    running; if it is not, report a blocker, do not skip. Confirm every service the stack starts is
-   up (see `docs/local-development.md` in the hub; do not assume a fixed list).
+   up (see `docs/local-development.md` in the hub; do not assume a fixed list). One stack serves
+   every session on the machine: if it is already running, reuse it and leave it running for its
+   owner, and run the clone you changed against it.
 2. **Smoke.** `bun run dev:smoke --strict` in the hub.
 3. **Integration.** In this repo, `bun run test:integration` (or its equivalent in `package.json`)
    against Docker.
@@ -29,6 +31,6 @@ Anything this reveals is a finding: fix it test-first, like a review finding.
    Evidence:  <paths to outputs and screenshots, in the scratchpad>
    Not run:   <what and why>
    ```
-6. **Stop.** `bun run dev --down` in the hub. Never `--volumes` unless asked.
+6. **Stop** a stack you started: `bun run dev --down` in the hub. Never `--volumes` unless asked.
 
 Use only test accounts and local origins. Never put evidence in the repo.
