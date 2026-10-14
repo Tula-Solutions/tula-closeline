@@ -404,6 +404,15 @@ describe('runDown', () => {
   }
 })
 
+describe('runDown does not depend on the Google settings', () => {
+  test('a half-set GOOGLE_* still runs compose down', async () => {
+    const h = harness({ parentEnv: { PATH: '/usr/bin', GOOGLE_CLIENT_ID: 'id' } })
+    expect(await runDown(h.context, h.deps, false)).toBe(0)
+    expect(h.calls.some((call) => call.cmd.includes('down'))).toBe(true)
+    expect(h.failed).toEqual([])
+  })
+})
+
 describe('runDown and a running stack', () => {
   test('stops the holder first, then compose', async () => {
     const h = harness({ holder: { kind: 'stopped', pid: 42 } })

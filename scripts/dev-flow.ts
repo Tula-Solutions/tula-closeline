@@ -87,11 +87,16 @@ export const INTERRUPTED = 130
  * the database address must be loopback, and the Docker endpoint in effect (the variable or the
  * current context) must be a unix socket. Prints why and returns undefined if either fails.
  */
-async function prepare(ctx: FlowContext, deps: FlowDeps, abort: Abort) {
+async function prepare(
+  ctx: FlowContext,
+  deps: FlowDeps,
+  abort: Abort,
+  parent: Record<string, string | undefined> = ctx.parentEnv
+) {
   let stack: StackEnv
   try {
     stack = deps.buildEnv({
-      parent: ctx.parentEnv,
+      parent,
       ports: ctx.ports,
       secrets: deps.secrets,
       dbDir: siblingDir(ctx.root, 'db'),
@@ -180,7 +185,11 @@ export async function runDown(ctx: FlowContext, deps: FlowDeps, volumes: boolean
       )
       return 1
     }
-    const ready = await prepare(ctx, deps, interrupt.abort)
+    // `--down` needs only the compose environment, so a bad Google setting must not stop it.
+    const withoutGoogle = Object.fromEntries(
+      Object.entries(ctx.parentEnv).filter(([name]) => !name.startsWith('GOOGLE_'))
+    )
+    const ready = await prepare(ctx, deps, interrupt.abort, withoutGoogle)
     if (!ready || interrupt.abort.signal.aborted) {
       return interrupt.abort.signal.aborted ? INTERRUPTED : 1
     }
