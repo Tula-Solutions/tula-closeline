@@ -366,6 +366,19 @@ describe('runDown and a running stack', () => {
     expect(h.calls).toEqual([])
   })
 
+  test('holds the start lock while compose goes down, and releases it', async () => {
+    const h = harness()
+    expect(await runDown(h.context, h.deps, false)).toBe(0)
+    expect(h.released()).toBe(1)
+  })
+
+  test('refuses when a start holds the lock, and runs no compose command', async () => {
+    const h = harness({ lockedBy: 7 })
+    expect(await runDown(h.context, h.deps, false)).toBe(1)
+    expect(h.failed.join('\n')).toMatch(/start/)
+    expect(h.calls).toEqual([])
+  })
+
   for (const kind of ['none', 'stale'] as const) {
     test(`${kind} lock still downs compose`, async () => {
       const h = harness({ holder: { kind } })

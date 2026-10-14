@@ -1119,9 +1119,15 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+/** `ps` runs with a fixed locale and zone, so a start time reads the same to writer and reader. */
+const psEnv = () => ({ ...process.env, LC_ALL: 'C', TZ: 'UTC' })
+
 /** A process's start time as `ps` prints it (macOS and Linux), or undefined if it is not known. */
-function processStart(pid: number): string | undefined {
-  const out = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' })
+export function processStart(pid: number): string | undefined {
+  const out = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+    encoding: 'utf8',
+    env: psEnv(),
+  })
   const text = out.status === 0 ? out.stdout.trim().replace(/\s+/g, ' ') : ''
   return text === '' ? undefined : text
 }
@@ -1144,25 +1150,66 @@ export type HolderOutcome =
   | { kind: 'killed'; pid: number }
   | { kind: 'failed'; reason: string }
 
-/** The pids of every descendant of `pid`, deepest last, read from `ps`. */
-function descendants(pid: number): number[] {
-  const out = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' })
-  const children = new Map<number, number[]>()
+/** A process recorded with its start time, so a reused pid can be told apart later. */
+export type Proc = { pid: number; start: string }
+
+/**
+ * Every descendant of `pid` with its start time, read in one `ps`; undefined when `ps` fails or
+ * its output cannot be read, which means the tree is not known (never "empty").
+ */
+function descendants(pid: number, psBin = 'ps'): Proc[] | undefined {
+  const out = spawnSync(psBin, ['-A', '-o', 'pid=,ppid=,lstart='], {
+    encoding: 'utf8',
+    env: psEnv(),
+  })
+  if (out.status !== 0 || out.error || out.stdout.trim() === '') {
+    return undefined
+  }
+  const rows = new Map<number, Proc[]>()
   for (const line of out.stdout.split('\n')) {
-    const [child, parent] = line.trim().split(/\s+/).map(Number)
-    if (child !== undefined && parent !== undefined && Number.isFinite(child)) {
-      children.set(parent, [...(children.get(parent) ?? []), child])
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
+    if (match) {
+      const parent = Number(match[2])
+      rows.set(parent, [
+        ...(rows.get(parent) ?? []),
+        { pid: Number(match[1]), start: (match[3] ?? '').replace(/\s+/g, ' ') },
+      ])
     }
   }
-  const found: number[] = []
+  const found: Proc[] = []
   const queue = [pid]
   for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
-    for (const child of children.get(next) ?? []) {
+    for (const child of rows.get(next) ?? []) {
       found.push(child)
-      queue.push(child)
+      queue.push(child.pid)
     }
   }
   return found
+}
+
+/**
+ * Removes the lock file only if it still holds `seen`: moves it aside, re-reads it, and puts it
+ * back when it changed meanwhile (a new live lock a start just linked).
+ */
+function removeLockIfSame(path: string, seen: string, beforeRemove?: () => void): void {
+  beforeRemove?.()
+  const moved = `${path}.${process.pid}.${randomBytes(4).toString('hex')}`
+  try {
+    renameSync(path, moved)
+  } catch {
+    return
+  }
+  try {
+    if (readFileSync(moved, 'utf8') !== seen) {
+      try {
+        linkSync(moved, path)
+      } catch {
+        // someone created a lock meanwhile; theirs stands
+      }
+    }
+  } finally {
+    rmSync(moved, { force: true })
+  }
 }
 
 /** Sends a signal, ignoring a process that is already gone. */
@@ -1182,7 +1229,14 @@ function signalPid(pid: number, signal: NodeJS.Signals): void {
  */
 export async function stopLockHolder(
   path: string = DEFAULT_LOCK_PATH,
-  options: { graceMs?: number; pollMs?: number } = {}
+  options: {
+    graceMs?: number
+    pollMs?: number
+    /** Test seams: the `ps` binary, the tree before it is used, and the moment before a removal. */
+    psBin?: string
+    onSnapshot?: (tree: Proc[]) => void
+    beforeRemove?: () => void
+  } = {}
 ): Promise<HolderOutcome> {
   const graceMs = options.graceMs ?? 20_000
   const pollMs = options.pollMs ?? 100
@@ -1199,12 +1253,29 @@ export async function stopLockHolder(
       reason: `the lock ${path} is empty or unreadable; delete it if nothing runs`,
     }
   }
-  const start = holder.start === 'unknown' ? undefined : processStart(holder.pid)
-  if (!pidAlive(holder.pid) || (start !== undefined && start !== holder.start)) {
-    rmSync(path, { force: true })
+  if (!pidAlive(holder.pid)) {
+    removeLockIfSame(path, text, options.beforeRemove)
     return { kind: 'stale' }
   }
-  const tree = descendants(holder.pid)
+  const start = holder.start === 'unknown' ? undefined : processStart(holder.pid)
+  if (start === undefined) {
+    return {
+      kind: 'failed',
+      reason: `cannot tell whether pid ${holder.pid} is the dev stack (its start time is unknown); not signalling it. Stop it by hand and delete ${path}`,
+    }
+  }
+  if (start !== holder.start) {
+    removeLockIfSame(path, text, options.beforeRemove)
+    return { kind: 'stale' }
+  }
+  const tree = descendants(holder.pid, options.psBin)
+  if (tree === undefined) {
+    return {
+      kind: 'failed',
+      reason: `could not list the processes of pid ${holder.pid} (ps failed); not stopping it, so nothing is killed by mistake`,
+    }
+  }
+  options.onSnapshot?.(tree)
   signalPid(holder.pid, 'SIGTERM')
   const deadline = Date.now() + graceMs
   while (Date.now() < deadline) {
@@ -1213,8 +1284,11 @@ export async function stopLockHolder(
     }
     await new Promise((resolve) => setTimeout(resolve, pollMs))
   }
-  for (const pid of [...descendants(holder.pid), ...tree, holder.pid]) {
-    signalPid(pid, 'SIGKILL')
+  // Each pid is checked against its recorded start time just before its SIGKILL.
+  for (const proc of [...tree.reverse(), { pid: holder.pid, start: holder.start }]) {
+    if (processStart(proc.pid) === proc.start) {
+      signalPid(proc.pid, 'SIGKILL')
+    }
   }
   for (let i = 0; i < 50 && pidAlive(holder.pid); i++) {
     await new Promise((resolve) => setTimeout(resolve, pollMs))
@@ -1222,13 +1296,7 @@ export async function stopLockHolder(
   if (pidAlive(holder.pid)) {
     return { kind: 'failed', reason: `pid ${holder.pid} did not die after SIGKILL` }
   }
-  try {
-    if (readFileSync(path, 'utf8') === text) {
-      unlinkSync(path)
-    }
-  } catch {
-    // already gone
-  }
+  removeLockIfSame(path, text)
   return { kind: 'killed', pid: holder.pid }
 }
 
