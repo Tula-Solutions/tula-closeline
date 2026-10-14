@@ -108,7 +108,11 @@ function harness(
               released++
             },
           }
-        : { held: true, pid: options.lockedBy },
+        : {
+            held: true,
+            pid: Number.isNaN(options.lockedBy) ? undefined : options.lockedBy,
+            path: '/tmp/x.lock',
+          },
     siblingProblems: () => options.siblingProblems ?? [],
     buildEnv: options.buildEnv ?? buildStackEnv,
     secrets: options.secrets ?? secrets,
@@ -678,6 +682,7 @@ describe('a second start while a stack is up (issue 86)', () => {
     expect(h.failed.join('\n')).toContain('already running')
     expect(h.failed.join('\n')).toContain('4242')
     expect(h.failed.join('\n')).toContain('reuse it')
+    expect(h.failed.join('\n')).toContain('/tmp/x.lock')
     expect(h.calls.filter((call) => call.kind !== 'capture' || call.cmd[1] === 'compose')).toEqual(
       []
     )
@@ -688,5 +693,12 @@ describe('a second start while a stack is up (issue 86)', () => {
     const h = harness()
     await runUp(h.context, h.deps)
     expect(h.released()).toBe(1)
+  })
+
+  test('a lock that cannot be taken says so, not "pid 0"', async () => {
+    const h = harness({ lockedBy: Number.NaN })
+    await runUp(h.context, h.deps)
+    expect(h.failed.join('\n')).toContain('could not take the lock')
+    expect(h.failed.join('\n')).not.toContain('pid')
   })
 })

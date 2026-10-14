@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createHash, createHmac, pbkdf2Sync } from 'node:crypto'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -855,7 +855,7 @@ describe('acquireStartLock', () => {
     const path = file()
     const first = acquireStartLock(path)
     expect(first.held).toBe(false)
-    expect(acquireStartLock(path)).toEqual({ held: true, pid: process.pid })
+    expect(acquireStartLock(path)).toEqual({ held: true, pid: process.pid, path })
     if (!first.held) {
       first.release()
     }
@@ -868,7 +868,49 @@ describe('acquireStartLock', () => {
 
   test('a lock left by a dead process is taken over', () => {
     const path = file()
-    writeFileSync(path, '2147483646')
+    writeFileSync(path, '2147483646 Thu Jan  1 00:00:00 1970')
+    const taken = acquireStartLock(path)
+    expect(taken.held).toBe(false)
+    if (!taken.held) {
+      taken.release()
+    }
+  })
+
+  test('an empty lock (a holder between create and write) is busy, never taken over', () => {
+    const path = file()
+    writeFileSync(path, '')
+    const result = acquireStartLock(path)
+    expect(result.held).toBe(true)
+    if (result.held) {
+      expect(result.pid).toBeUndefined()
+      expect(result.path).toBe(path)
+    }
+    expect(readFileSync(path, 'utf8')).toBe('')
+  })
+
+  test('two takers that saw the same dead pid end with exactly one holder', () => {
+    const path = file()
+    writeFileSync(path, '2147483646 Thu Jan  1 00:00:00 1970')
+    let second: ReturnType<typeof acquireStartLock> | undefined
+    const first = acquireStartLock(path, {
+      beforeTakeover: () => {
+        // The other taker runs to completion between this one's read and its takeover.
+        if (second === undefined) {
+          second = acquireStartLock(path)
+        }
+      },
+    })
+    expect(second?.held).toBe(false)
+    expect(first.held).toBe(true)
+    if (first.held) {
+      expect(first.pid).toBe(process.pid)
+    }
+    expect(readFileSync(path, 'utf8')).toStartWith(`${process.pid} `)
+  })
+
+  test('a live pid with a different start time is a reused pid, not the stack', () => {
+    const path = file()
+    writeFileSync(path, `${process.pid} Thu Jan  1 00:00:00 1970`)
     const taken = acquireStartLock(path)
     expect(taken.held).toBe(false)
     if (!taken.held) {

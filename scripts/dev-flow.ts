@@ -64,7 +64,7 @@ export type FlowDeps = {
    * Takes the machine-wide start-up lock. The compose project and every port are shared, and a
    * start replaces the database role passwords, so a second start would break the first.
    */
-  lock: () => { held: false; release: () => void } | { held: true; pid: number }
+  lock: () => { held: false; release: () => void } | { held: true; pid?: number; path: string }
   siblingProblems: (root: string) => string[]
   buildEnv: typeof buildStackEnv
   secrets: Secrets
@@ -184,8 +184,11 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
   const lock = deps.lock()
   if (lock.held) {
     deps.fail(
-      `a dev stack is already running (bun run dev, pid ${lock.pid}): reuse it, or stop it first. ` +
-        'Starting a second one would replace the database passwords the first uses'
+      lock.pid === undefined
+        ? `could not take the lock ${lock.path}: another start may be in progress; try again, ` +
+            'or delete the file if nothing is running'
+        : `a dev stack is already running (bun run dev, pid ${lock.pid}): reuse it, or stop it first. ` +
+            `Starting a second one would replace the database passwords the first uses. Lock: ${lock.path}`
     )
     return 1
   }
