@@ -313,6 +313,43 @@ export const PLAYBOOK_QUEUE = 'closeline-playbook'
 /** The bucket the object storage stand-in creates (`compose.dev.yaml`). */
 export const STORAGE_BUCKET = 'closeline-dev'
 
+/**
+ * Reads the optional `CLOSELINE_DEV_PUBLIC_ORIGIN` (a tunnel in front of the portal). It must be
+ * exactly `https://<lower-case host>` with an optional port; anything else throws. Returns the
+ * origin and its host name (no port), or `undefined` when the variable is unset or empty.
+ */
+export function resolvePublicOrigin(
+  env: Record<string, string | undefined>
+): { origin: string; host: string } | undefined {
+  const raw = env.CLOSELINE_DEV_PUBLIC_ORIGIN
+  if (raw === undefined || raw === '') {
+    return undefined
+  }
+  const match =
+    /^https:\/\/([a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)*)(?::([0-9]{1,5}))?$/.exec(
+      raw
+    )
+  // A browser omits the default port from its Origin header, and a port is 1 to 65535.
+  const port = match?.[2]
+  const badPort =
+    port !== undefined && (!/^[1-9][0-9]*$/.test(port) || Number(port) > 65535 || port === '443')
+  // The URL parser must agree, and an all-digit last label would be read as an IPv4 address.
+  const host = match?.[1]
+  const lastLabelNumeric = host !== undefined && /^[0-9]+$/.test(host.split('.').pop() ?? '')
+  let urlAgrees = false
+  try {
+    urlAgrees = new URL(raw).origin === raw
+  } catch {
+    urlAgrees = false
+  }
+  if (!host || badPort || lastLabelNumeric || !urlAgrees) {
+    throw new Error(
+      `CLOSELINE_DEV_PUBLIC_ORIGIN must be https://<lower-case host> with an optional port, no path, query or trailing slash (got ${JSON.stringify(raw)})`
+    )
+  }
+  return { origin: raw, host }
+}
+
 /** The origins the services are reached at, from the host. */
 export function origins(ports: Ports): {
   auth: string
@@ -361,6 +398,7 @@ export function buildStackEnv(options: {
 }): StackEnv {
   const { parent, ports, secrets, dbDir } = options
   const host = options.databaseHost ?? '127.0.0.1'
+  const publicOrigin = resolvePublicOrigin(parent)
   if (parent.DOCKER_HOST && !isLocalDockerHost(parent.DOCKER_HOST)) {
     throw new Error(
       `DOCKER_HOST (${parent.DOCKER_HOST}) is not a local unix socket; the dev stack only runs on local Docker`
@@ -398,7 +436,10 @@ export function buildStackEnv(options: {
       CORE_INTERNAL_TOKEN: secrets.internalToken,
       MAIL_LOCAL_URL: where.mail,
       // The portal's origin: without it auth answers a browser session refresh 403 auth.forbidden.
-      SESSION_ALLOWED_ORIGINS: where.portal,
+      // A tunnel origin (CLOSELINE_DEV_PUBLIC_ORIGIN) is allowed as well when one is set.
+      SESSION_ALLOWED_ORIGINS: publicOrigin
+        ? `${where.portal},${publicOrigin.origin}`
+        : where.portal,
     },
     core: {
       ...base,
@@ -441,6 +482,10 @@ export function buildStackEnv(options: {
       AUTH_PROXY_TARGET: where.auth,
       CORE_PROXY_TARGET: where.core,
       PLAYBOOK_PROXY_TARGET: where.playbook,
+      // Vite blocks an unknown Host header. This variable is Vite-internal and undocumented,
+      // checked against Vite 8.3.4; if a Vite release drops it the tunnel fails as "Blocked
+      // request". The portal should later read its own env var into `server.allowedHosts`.
+      ...(publicOrigin ? { __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: publicOrigin.host } : {}),
     },
   }
 }
