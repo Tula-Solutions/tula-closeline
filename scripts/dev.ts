@@ -32,7 +32,10 @@ const USAGE = `usage: bun run dev [--down [--volumes]]
   --down --volumes   also delete the dev stack's volumes (database and storage data)
 
 Environment: CLOSELINE_SIBLINGS_DIR (where the tula-closeline-* clones are, default: next to
-this repo), CLOSELINE_DEV_{POSTGRES,QUEUE,STORAGE,MAIL,AUTH,CORE,PLAYBOOK,PORTAL}_PORT.
+this repo), CLOSELINE_DEV_{POSTGRES,QUEUE,STORAGE,MAIL,AUTH,CORE,PLAYBOOK,PORTAL,FAKE_GOOGLE}_PORT.
+
+Sign in with Google: with no GOOGLE_* variable set, a fake provider (loopback only) is started and
+used. Set all of GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI to use real Google.
 `
 
 function say(line: string): void {

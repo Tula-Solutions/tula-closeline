@@ -14,6 +14,7 @@ import {
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { FAKE_GOOGLE_CLIENT_ID, FAKE_GOOGLE_CLIENT_SECRET } from './dev-fake-google.ts'
 
 /** The compose project name; `docker compose -p` and every volume of the dev stack carry it. */
 export const COMPOSE_PROJECT = 'closeline-dev'
@@ -34,6 +35,8 @@ export type Ports = {
   core: number
   playbook: number
   portal: number
+  /** The fake Google OpenID provider (loopback only), used when no real Google is configured. */
+  fakeGoogle: number
 }
 
 /** The ports used when no override is set. 5434 to 5437 belong to the repos' test databases. */
@@ -46,6 +49,7 @@ export const DEFAULT_PORTS: Ports = {
   core: 3100,
   playbook: 3003,
   portal: 3002,
+  fakeGoogle: 3010,
 }
 
 const PORT_VARIABLES: Record<keyof Ports, string> = {
@@ -57,6 +61,7 @@ const PORT_VARIABLES: Record<keyof Ports, string> = {
   core: 'CLOSELINE_DEV_CORE_PORT',
   playbook: 'CLOSELINE_DEV_PLAYBOOK_PORT',
   portal: 'CLOSELINE_DEV_PORTAL_PORT',
+  fakeGoogle: 'CLOSELINE_DEV_FAKE_GOOGLE_PORT',
 }
 
 /** Reads the port overrides from the environment; throws naming the variable if one is invalid. */
@@ -357,6 +362,7 @@ export function origins(ports: Ports): {
   playbook: string
   portal: string
   mail: string
+  fakeGoogle: string
 } {
   return {
     mail: `http://127.0.0.1:${ports.mail}`,
@@ -364,6 +370,60 @@ export function origins(ports: Ports): {
     core: `http://127.0.0.1:${ports.core}`,
     playbook: `http://127.0.0.1:${ports.playbook}`,
     portal: `http://127.0.0.1:${ports.portal}`,
+    fakeGoogle: `http://127.0.0.1:${ports.fakeGoogle}`,
+  }
+}
+
+/** The path Google sends the browser back to; auth requires the redirect URI to end in it. */
+export const GOOGLE_CALLBACK_PATH = '/v1/client/google/callback'
+
+/** How auth is configured for Sign in with Google: the fake provider, or the developer's own. */
+export type GoogleSetup =
+  | { kind: 'fake'; redirectUri: string }
+  | { kind: 'real'; clientId: string; clientSecret: string; redirectUri: string }
+
+/**
+ * Decides from the shell whether the stack uses the fake Google provider or real Google. None of
+ * `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and `GOOGLE_REDIRECT_URI` set means the fake; all
+ * three means real; a mix throws (auth would refuse it at boot). A real redirect URI must be at the
+ * callback path on the portal origin, or on the tunnel origin when one is set. Messages name the
+ * variable and never print a value.
+ */
+export function resolveGoogle(
+  env: Record<string, string | undefined>,
+  ports: Ports,
+  publicOrigin: { origin: string } | undefined
+): GoogleSetup {
+  const portalCallback = `${origins(ports).portal}${GOOGLE_CALLBACK_PATH}`
+  const names = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REDIRECT_URI'] as const
+  const value = (name: (typeof names)[number]) => {
+    const raw = env[name]
+    return raw === undefined || raw === '' ? undefined : raw
+  }
+  if (names.every((name) => value(name) === undefined)) {
+    return { kind: 'fake', redirectUri: portalCallback }
+  }
+  const missing = names.filter((name) => value(name) === undefined)
+  if (missing.length > 0) {
+    throw new Error(
+      `${missing.join(', ')} must be set too: set all of ${names.join(', ')} for real Google sign-in, or none for the fake provider`
+    )
+  }
+  const redirectUri = value('GOOGLE_REDIRECT_URI') ?? ''
+  const allowed = [
+    portalCallback,
+    ...(publicOrigin ? [`${publicOrigin.origin}${GOOGLE_CALLBACK_PATH}`] : []),
+  ]
+  if (!allowed.includes(redirectUri)) {
+    throw new Error(
+      `GOOGLE_REDIRECT_URI must be ${allowed.join(' or ')} (the portal's proxy serves the callback)`
+    )
+  }
+  return {
+    kind: 'real',
+    clientId: value('GOOGLE_CLIENT_ID') ?? '',
+    clientSecret: value('GOOGLE_CLIENT_SECRET') ?? '',
+    redirectUri,
   }
 }
 
@@ -377,6 +437,8 @@ export type StackEnv = {
   core: Record<string, string>
   playbook: Record<string, string>
   portal: Record<string, string>
+  /** The fake Google provider's process; undefined when real Google settings are in use. */
+  fakeGoogle: Record<string, string> | undefined
 }
 
 /**
@@ -413,6 +475,7 @@ export function buildStackEnv(options: {
   }
   const base = baseChildEnv(parent)
   const where = origins(ports)
+  const google = resolveGoogle(parent, ports, publicOrigin)
   const common = { ENVIRONMENT: 'local', REGION: 'us', LOG_LEVEL: 'info', SHUTDOWN_GRACE_MS: '0' }
   return {
     compose: {
@@ -440,6 +503,18 @@ export function buildStackEnv(options: {
       SESSION_ALLOWED_ORIGINS: publicOrigin
         ? `${where.portal},${publicOrigin.origin}`
         : where.portal,
+      ...(google.kind === 'real'
+        ? {
+            GOOGLE_CLIENT_ID: google.clientId,
+            GOOGLE_CLIENT_SECRET: google.clientSecret,
+            GOOGLE_REDIRECT_URI: google.redirectUri,
+          }
+        : {
+            GOOGLE_CLIENT_ID: FAKE_GOOGLE_CLIENT_ID,
+            GOOGLE_CLIENT_SECRET: FAKE_GOOGLE_CLIENT_SECRET,
+            GOOGLE_REDIRECT_URI: google.redirectUri,
+            GOOGLE_ISSUER_URL: where.fakeGoogle,
+          }),
     },
     core: {
       ...base,
@@ -486,7 +561,21 @@ export function buildStackEnv(options: {
       // checked against Vite 8.3.4; if a Vite release drops it the tunnel fails as "Blocked
       // request". The portal should later read its own env var into `server.allowedHosts`.
       ...(publicOrigin ? { __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: publicOrigin.host } : {}),
+      // The portal lets the browser follow a redirect to this host only (the fake provider).
+      ...(google.kind === 'fake'
+        ? { VITE_GOOGLE_FAKE_ISSUER_HOST: `127.0.0.1:${ports.fakeGoogle}` }
+        : {}),
     },
+    fakeGoogle:
+      google.kind === 'fake'
+        ? {
+            ...base,
+            FAKE_GOOGLE_PORT: String(ports.fakeGoogle),
+            FAKE_GOOGLE_CLIENT_ID,
+            FAKE_GOOGLE_CLIENT_SECRET,
+            FAKE_GOOGLE_REDIRECT_URI: google.redirectUri,
+          }
+        : undefined,
   }
 }
 
@@ -623,19 +712,37 @@ export function checkSiblings(root: string, needed: readonly Sibling[] = SIBLING
 
 /** What the stack runs besides the compose services, in start order. */
 export type ServiceDefinition = {
-  name: 'auth' | 'core' | 'playbook' | 'portal'
-  sibling: Sibling
+  name: 'fake-google' | 'auth' | 'core' | 'playbook' | 'portal'
+  /** The clone it runs from; undefined means the hub itself. */
+  sibling?: Sibling
   /** The command, run from the clone. `--no-env-file` keeps a stray `.env` out of the process. */
   cmd: string[]
-  env: keyof Pick<StackEnv, 'auth' | 'core' | 'playbook' | 'portal'>
+  env: keyof Pick<StackEnv, 'fakeGoogle' | 'auth' | 'core' | 'playbook' | 'portal'>
   /** The URL that answers 2xx when the service is ready. */
   readyUrl: string
 }
 
-/** The four processes `dev.ts` starts. `bun` is the path of the running Bun. */
-export function serviceDefinitions(bun: string, ports: Ports): ServiceDefinition[] {
+/**
+ * The processes `dev.ts` starts. `bun` is the path of the running Bun; `fakeGoogle` adds the fake
+ * Google provider first, so it is up before auth is asked to sign anyone in.
+ */
+export function serviceDefinitions(
+  bun: string,
+  ports: Ports,
+  fakeGoogle = false
+): ServiceDefinition[] {
   const where = origins(ports)
   return [
+    ...(fakeGoogle
+      ? [
+          {
+            name: 'fake-google' as const,
+            cmd: [bun, '--no-env-file', 'scripts/dev-fake-google.ts'],
+            env: 'fakeGoogle' as const,
+            readyUrl: `${where.fakeGoogle}/readyz`,
+          },
+        ]
+      : []),
     {
       name: 'core',
       sibling: 'core',
