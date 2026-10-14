@@ -279,6 +279,8 @@ export async function startFakeGoogle(options: FakeGoogleOptions): Promise<FakeG
     )
   }
 
+  // No Host or Origin check and a constant client secret: this listens on loopback only, and auth's
+  // state-and-cookie binding stops a forged callback, so neither adds protection here.
   const server = Bun.serve({
     port: options.port,
     hostname: '127.0.0.1',

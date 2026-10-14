@@ -146,6 +146,11 @@ a mix (only some of the three set) naming the missing variable, never a value. T
 scrubbed from the services' output like the generated secrets. `GOOGLE_ISSUER_URL` in your shell is
 ignored.
 
+**Switching between the fake and real Google.** A user created through the fake is linked to the
+fake's `sub`, not Google's. Signing in later with the same email through real Google is refused
+(ADR 0019 section 3: an account is matched by its `sub`, never by email). To switch, use a different
+email, or reset the local data with `bun run dev --down --volumes`.
+
 `bun run dev:smoke` covers the fake provider (see below) and skips the Google steps, with the
 reason, when the stack uses real Google or has Google off.
 
