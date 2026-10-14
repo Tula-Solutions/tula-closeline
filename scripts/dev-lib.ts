@@ -1,8 +1,18 @@
 // The logic behind `bun run dev` (scripts/dev.ts) and `bun run dev:smoke` (scripts/dev-smoke.ts)
 // that can be tested without Docker: arguments, ports, secrets, environments, output handling.
+import { spawnSync } from 'node:child_process'
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import {
+  existsSync,
+  linkSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { connect } from 'node:net'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 /** The compose project name; `docker compose -p` and every volume of the dev stack carry it. */
@@ -387,6 +397,8 @@ export function buildStackEnv(options: {
       CORE_BASE_URL: where.core,
       CORE_INTERNAL_TOKEN: secrets.internalToken,
       MAIL_LOCAL_URL: where.mail,
+      // The portal's origin: without it auth answers a browser session refresh 403 auth.forbidden.
+      SESSION_ALLOWED_ORIGINS: where.portal,
     },
     core: {
       ...base,
@@ -1095,4 +1107,106 @@ export async function supervise(options: SuperviseOptions): Promise<number> {
     await stopAll(children, options.graceMs)
   }
   return exitCode
+}
+
+/** Whether a process with this pid is alive. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/** A process's start time as `ps` prints it (macOS and Linux), or undefined if it is not known. */
+function processStart(pid: number): string | undefined {
+  const out = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' })
+  const text = out.status === 0 ? out.stdout.trim().replace(/\s+/g, ' ') : ''
+  return text === '' ? undefined : text
+}
+
+/** Parses a lock file's `<pid> <start time>`; undefined for an empty or malformed one. */
+function parseLock(text: string): { pid: number; start: string } | undefined {
+  const match = /^(\d+) (.+)$/.exec(text.trim())
+  const pid = Number(match?.[1])
+  return match && Number.isSafeInteger(pid) && pid > 0 ? { pid, start: match[2] ?? '' } : undefined
+}
+
+/** Waits a few milliseconds without spinning. */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * Takes the machine-wide lock a running `bun run dev` holds. The file holds `<pid> <start time>`
+ * and is created whole (written to a temp file, then hard-linked into place), so a reader never
+ * sees it empty. A live holder is refused with its pid. An empty or unreadable lock is treated as
+ * busy, never stale. A lock whose process is gone, or whose pid now belongs to a process that
+ * started at another time, is moved aside and re-checked before it is deleted. With no pid in the
+ * refusal the lock could not be taken at all.
+ */
+export function acquireStartLock(
+  path: string = join(tmpdir(), 'closeline-dev-stack.lock'),
+  seam: { beforeTakeover?: () => void } = {}
+): { held: false; release: () => void } | { held: true; pid?: number; path: string } {
+  const mine = `${process.pid} ${processStart(process.pid) ?? 'unknown'}`
+  const unique = () => `${path}.${process.pid}.${randomBytes(4).toString('hex')}`
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const temp = unique()
+    try {
+      writeFileSync(temp, mine)
+      linkSync(temp, path)
+      return {
+        held: false,
+        release: () => {
+          try {
+            if (readFileSync(path, 'utf8') === mine) {
+              unlinkSync(path)
+            }
+          } catch {
+            // already gone
+          }
+        },
+      }
+    } catch {
+      // the lock exists, or could not be written: look at it
+    } finally {
+      rmSync(temp, { force: true })
+    }
+    let seen: string
+    try {
+      seen = readFileSync(path, 'utf8')
+    } catch {
+      continue
+    }
+    const holder = parseLock(seen)
+    if (!holder) {
+      pause(25 * (attempt + 1))
+      continue
+    }
+    const start = holder.start === 'unknown' ? undefined : processStart(holder.pid)
+    if (pidAlive(holder.pid) && (start === undefined || start === holder.start)) {
+      return { held: true, pid: holder.pid, path }
+    }
+    seam.beforeTakeover?.()
+    const moved = unique()
+    try {
+      renameSync(path, moved)
+    } catch {
+      continue
+    }
+    if (readFileSync(moved, 'utf8') === seen) {
+      rmSync(moved, { force: true })
+    } else {
+      // Not the dead lock we saw: a live holder's. Put it back.
+      try {
+        linkSync(moved, path)
+      } catch {
+        // someone created a lock meanwhile; theirs stands
+      }
+      rmSync(moved, { force: true })
+    }
+  }
+  return { held: true, path }
 }

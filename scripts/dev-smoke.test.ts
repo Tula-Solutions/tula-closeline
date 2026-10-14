@@ -50,7 +50,7 @@ describe('runSmoke against a healthy stack', () => {
     const refreshes = stack.seen
       .filter((call) => call.path === '/v1/client/sessions/refresh')
       .map((call) => call.body)
-    expect(refreshes).toHaveLength(5)
+    expect(refreshes).toHaveLength(6)
     expect(refreshes.length - new Set(refreshes).size).toBe(1)
     expect(
       stack.seen.filter((call) => call.path === '/v1/invitations' && call.method === 'POST')
@@ -124,6 +124,29 @@ describe('refresh', () => {
     const refresh = by(results, 'refresh the session')
     expect(refresh?.status).toBe('fail')
     expect(refresh?.detail).toContain('did not rotate')
+  })
+})
+
+describe('refresh through the portal', () => {
+  const STEP = 'refresh through the portal with its Origin'
+
+  test('passes when auth allows the portal origin, and the portal origin is what auth sees', async () => {
+    const { stack, results } = await run()
+    expect(by(results, STEP)?.status).toBe('pass')
+    const viaPortal = stack.seen.filter(
+      (call) => call.path === '/v1/client/sessions/refresh' && call.origin === stack.targets.portal
+    )
+    expect(viaPortal).toHaveLength(1)
+  })
+
+  test('fails when auth has no allowed origin for the portal (issue 86)', async () => {
+    const { results } = await run({ noAllowedOrigin: true })
+    const step = by(results, STEP)
+    expect(step?.status).toBe('fail')
+    expect(step?.detail).toContain('403')
+    expect(step?.detail).toContain('auth.forbidden')
+    expect(by(results, 'refresh the session')?.status).toBe('pass')
+    expect(exitCodeFor(results)).toBe(1)
   })
 })
 

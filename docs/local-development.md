@@ -170,6 +170,7 @@ the stack and runs `bun run dev:smoke --strict`, a person runs it.
 | verify the email code, sign in | the code is accepted; sign-in with the password gives a session |
 | core `GET /v1/organization` and `GET /v1/members` | with the access token: the Organization in the token, and exactly one member, the Owner |
 | refresh the session | the refresh token rotates and the new access token works at core; the spent refresh token is not reused here (the next row does that on its own session). The access token may be the same string as the last (it holds the session id and a one-second issue time), so only the refresh token is compared |
+| refresh through the portal with its Origin | `POST /v1/client/sessions/refresh` through the portal's dev server with the portal's `Origin`; auth must allow it (`SESSION_ALLOWED_ORIGINS` is set to the portal origin, port override included), or the portal shows "not set up correctly for this address" |
 | create an Invitation | `POST /v1/invitations` for a new address, role `rep`, with an `Idempotency-Key` |
 | the Invitation email and its link | the email reaches the mailbox and its link points at the portal's `/sign-up` page |
 | create a Team | `POST /v1/teams` as the first user, for the isolation checks |
@@ -250,3 +251,5 @@ The next `bun run dev` recreates the database, roles, queues and bucket.
   `3100`, core's defaults put auth on `3001` and the portal on `3002`, and the portal's example
   puts core on `3002` and the playbook on `3003`. This script uses auth 3001, core 3100, playbook
   3003, portal 3002.
+
+**One start at a time.** `bun run dev` takes a machine-wide lock (`closeline-dev-stack.lock` in the temp directory, holding its pid). A second start while the first lives refuses with "already running, reuse it" before touching Docker or any password, because a start replaces the database role passwords and would break the running stack. A lock left by a dead process is taken over.

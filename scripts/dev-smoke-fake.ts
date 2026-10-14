@@ -6,7 +6,13 @@ import { createPlaybookFake, type PlaybookFakeOptions } from './dev-smoke-playbo
 // test can show the smoke test notices.
 
 /** One request the fake saw. */
-export type Seen = { method: string; path: string; body: string; key: string | null }
+export type Seen = {
+  method: string
+  path: string
+  body: string
+  key: string | null
+  origin?: string | null
+}
 
 /** What can be broken in the fake. Every option is off by default. */
 export type FakeOptions = {
@@ -16,6 +22,8 @@ export type FakeOptions = {
   coreOpen?: boolean
   /** Which core list ignores the Organization in the token and returns every row. */
   leak?: 'invitations' | 'members' | 'organization' | 'teams'
+  /** Auth has no allowed origin: a refresh that carries an Origin header answers 403 auth.forbidden. */
+  noAllowedOrigin?: boolean
   /** Refresh hands back the same refresh token. */
   reuseRefreshToken?: boolean
   /** Every access token for a user is the same string, as when two are issued in one second. */
@@ -106,7 +114,7 @@ export function fakeStack(options: FakeOptions = {}) {
   const teams: { id: string; orgId: string; name: string }[] = []
   let counter = 0
   const next = (prefix: string) => `${prefix}_${++counter}_${crypto.randomUUID().slice(0, 8)}`
-  const origins = { portal: '' }
+  const origins = { portal: '', auth: '' }
 
   const json = (body: unknown, status = 200) => Response.json(body, { status })
   const error = (status: number, code: string) => json({ error: { code } }, status)
@@ -242,6 +250,9 @@ export function fakeStack(options: FakeOptions = {}) {
       })
     }
     if (path === '/v1/client/sessions/refresh' && request.method === 'POST') {
+      if (options.noAllowedOrigin && request.headers.get('origin') !== null) {
+        return error(403, 'auth.forbidden')
+      }
       const token = String(body.refreshToken)
       const found = tokens.get(token)
       if (!found) {
@@ -523,14 +534,26 @@ export function fakeStack(options: FakeOptions = {}) {
       fetch: async (request) => {
         const url = new URL(request.url)
         const raw = await request.text()
-        seen.push({
-          method: request.method,
-          path: url.pathname,
-          body: raw,
-          key: request.headers.get('idempotency-key'),
-        })
+        // A request the portal only forwards to auth is recorded once, by auth.
+        if (!(which === 'portal' && url.pathname.startsWith('/v1/client/'))) {
+          seen.push({
+            method: request.method,
+            path: url.pathname,
+            body: raw,
+            key: request.headers.get('idempotency-key'),
+            origin: request.headers.get('origin'),
+          })
+        }
         if (url.pathname === '/readyz') {
           return json({ status: 'ok' })
+        }
+        if (which === 'portal' && url.pathname.startsWith('/v1/client/')) {
+          // The portal's dev server proxies /v1/client/... to auth, keeping the Origin header.
+          return fetch(`${origins.auth}${url.pathname}`, {
+            method: request.method,
+            headers: request.headers,
+            body: raw === '' ? undefined : raw,
+          })
         }
         if (which === 'portal') {
           return new Response('<!doctype html>', { headers: { 'content-type': 'text/html' } })
@@ -560,6 +583,7 @@ export function fakeStack(options: FakeOptions = {}) {
   }
   const origin = (name: keyof typeof servers) => `http://127.0.0.1:${servers[name].port}`
   origins.portal = origin('portal')
+  origins.auth = origin('auth')
   return {
     seen,
     mailbox,

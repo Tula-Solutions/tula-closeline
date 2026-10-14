@@ -42,6 +42,8 @@ function harness(
     /** Compose services that already have a running container. */
     running?: string[]
     secrets?: typeof secrets
+    /** Another live `bun run dev` holds the start-up lock (its pid). */
+    lockedBy?: number
   } = {}
 ) {
   const calls: Call[] = []
@@ -51,6 +53,7 @@ function harness(
   const waited: string[] = []
   const busyAsked: { name: string; port: number }[] = []
   let supervised = false
+  let released = 0
   const label = (cmd: string[]) => cmd.slice(0, 3).join(' ')
   const deps: FlowDeps = {
     run: async (name, cmd, opts) => {
@@ -97,6 +100,19 @@ function harness(
       busyAsked.push(...wanted)
       return options.busy ?? []
     },
+    lock: () =>
+      options.lockedBy === undefined
+        ? {
+            held: false,
+            release: () => {
+              released++
+            },
+          }
+        : {
+            held: true,
+            pid: Number.isNaN(options.lockedBy) ? undefined : options.lockedBy,
+            path: '/tmp/x.lock',
+          },
     siblingProblems: () => options.siblingProblems ?? [],
     buildEnv: options.buildEnv ?? buildStackEnv,
     secrets: options.secrets ?? secrets,
@@ -136,6 +152,7 @@ function harness(
       }
     },
     liveHandlers: () => live.size,
+    released: () => released,
     waited,
     busyAsked,
     supervised: () => supervised,
@@ -654,5 +671,34 @@ describe('ports of a stack that is partly up', () => {
     for (const name of ['Postgres', 'queue stand-in', 'object storage stand-in', 'mailbox']) {
       expect(asked).toContain(name)
     }
+  })
+})
+
+describe('a second start while a stack is up (issue 86)', () => {
+  test('refuses, naming the running start, and touches neither Docker nor any role password', async () => {
+    const h = harness({ lockedBy: 4242, running: ['postgres'] })
+    const code = await runUp(h.context, h.deps)
+    expect(code).toBe(1)
+    expect(h.failed.join('\n')).toContain('already running')
+    expect(h.failed.join('\n')).toContain('4242')
+    expect(h.failed.join('\n')).toContain('reuse it')
+    expect(h.failed.join('\n')).toContain('/tmp/x.lock')
+    expect(h.calls.filter((call) => call.kind !== 'capture' || call.cmd[1] === 'compose')).toEqual(
+      []
+    )
+    expect(h.calls.some((call) => call.stdin?.includes('PASSWORD'))).toBe(false)
+  })
+
+  test('the lock is released when a start ends', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    expect(h.released()).toBe(1)
+  })
+
+  test('a lock that cannot be taken says so, not "pid 0"', async () => {
+    const h = harness({ lockedBy: Number.NaN })
+    await runUp(h.context, h.deps)
+    expect(h.failed.join('\n')).toContain('could not take the lock')
+    expect(h.failed.join('\n')).not.toContain('pid')
   })
 })

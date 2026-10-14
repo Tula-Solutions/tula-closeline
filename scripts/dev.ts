@@ -3,6 +3,7 @@
 import { dirname, join, resolve } from 'node:path'
 import { type FlowContext, type FlowDeps, runDown, runUp } from './dev-flow.ts'
 import {
+  acquireStartLock,
   buildStackEnv,
   busyPorts,
   captureCommand,
@@ -48,6 +49,7 @@ export function createDeps(): FlowDeps {
     spawn: spawnManaged,
     supervise,
     busy: busyPorts,
+    lock: acquireStartLock,
     siblingProblems: (root) => checkSiblings(root),
     buildEnv: buildStackEnv,
     secrets: generateSecrets(),
