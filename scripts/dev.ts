@@ -24,12 +24,12 @@ const hub = resolve(import.meta.dir, '..')
 
 const USAGE = `usage: bun run dev [--down [--volumes]]
 
-  (no flags)         start the stack and the three services; Ctrl-C stops the services
+  (no flags)         start the stack and the four services; Ctrl-C stops the services
   --down             stop and remove the dev compose containers
   --down --volumes   also delete the dev stack's volumes (database and storage data)
 
 Environment: CLOSELINE_SIBLINGS_DIR (where the tula-closeline-* clones are, default: next to
-this repo), CLOSELINE_DEV_{POSTGRES,QUEUE,STORAGE,AUTH,CORE,PORTAL}_PORT.
+this repo), CLOSELINE_DEV_{POSTGRES,QUEUE,STORAGE,MAIL,AUTH,CORE,PLAYBOOK,PORTAL}_PORT.
 `
 
 function say(line: string): void {

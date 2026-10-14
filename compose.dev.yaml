@@ -14,8 +14,8 @@
 # 9324 (CLOSELINE_DEV_QUEUE_PORT), object storage 9090 (CLOSELINE_DEV_STORAGE_PORT), the mailbox web
 # page and API 8026 (CLOSELINE_DEV_MAIL_PORT). 5434 to 5437 belong to the repos' own test databases.
 #
-# The queue and object storage are provisioned but nothing consumes them yet: the queue and
-# object storage ports in tula-closeline-kit (plan steps 1.10 and 1.12) are not built.
+# The playbook service uses the queue (queue closeline-playbook, in scripts/dev/elasticmq.conf) and
+# the object storage (bucket closeline-dev); scripts/dev-lib.ts gives it both addresses.
 name: closeline-dev
 
 services:

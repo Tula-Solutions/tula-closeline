@@ -1,4 +1,6 @@
-// A stand-in for auth, core, the portal and the Mailpit API, used only by the smoke test's own
+import { createPlaybookFake, type PlaybookFakeOptions } from './dev-smoke-playbook-fake.ts'
+
+// A stand-in for auth, core, the playbook, the portal and the Mailpit API, used only by the smoke test's own
 // tests. It behaves like the real services for the calls the smoke test makes (codes in a mailbox,
 // refresh tokens that work once, separate Organizations) and each option breaks one thing, so a
 // test can show the smoke test notices.
@@ -80,11 +82,13 @@ export type FakeOptions = {
   teamsNotFoundForEveryone?: boolean
   /** Core takes the Organization from an `x-organization-id` header or `organizationId` query. */
   trustOrganizationHeader?: boolean
+  /** What is broken in the playbook: see dev-smoke-playbook-fake.ts. */
+  playbook?: PlaybookFakeOptions
 }
 
 type Mail = { id: string; to: string; subject: string; text: string; visibleAt: number }
 
-/** Starts the four fake servers; `stop()` closes them. */
+/** Starts the five fake servers; `stop()` closes them. */
 export function fakeStack(options: FakeOptions = {}) {
   const seen: Seen[] = []
   const mailbox: Mail[] = []
@@ -492,6 +496,26 @@ export function fakeStack(options: FakeOptions = {}) {
     return undefined
   }
 
+  const playbookHandler = createPlaybookFake(
+    (token) => sessions.get(token)?.orgId,
+    options.playbook
+  )
+  const playbookServer = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      const multipart = (request.headers.get('content-type') ?? '').startsWith('multipart/')
+      seen.push({
+        method: request.method,
+        path: url.pathname,
+        body: multipart ? '(multipart)' : await request.clone().text(),
+        key: request.headers.get('idempotency-key'),
+      })
+      return playbookHandler(request)
+    },
+  })
+
   const serve = (which: 'auth' | 'core' | 'portal' | 'mail') =>
     Bun.serve({
       port: 0,
@@ -532,6 +556,7 @@ export function fakeStack(options: FakeOptions = {}) {
     core: serve('core'),
     portal: serve('portal'),
     mail: serve('mail'),
+    playbook: playbookServer,
   }
   const origin = (name: keyof typeof servers) => `http://127.0.0.1:${servers[name].port}`
   origins.portal = origin('portal')
@@ -541,6 +566,7 @@ export function fakeStack(options: FakeOptions = {}) {
     targets: {
       auth: origin('auth'),
       core: origin('core'),
+      playbook: origin('playbook'),
       portal: origin('portal'),
       mail: origin('mail'),
     },

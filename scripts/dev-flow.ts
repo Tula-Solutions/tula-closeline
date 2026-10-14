@@ -88,7 +88,7 @@ async function prepare(ctx: FlowContext, deps: FlowDeps, abort: Abort) {
       secrets: deps.secrets,
       dbDir: siblingDir(ctx.root, 'db'),
     })
-    for (const env of [stack.migrate, stack.auth, stack.core]) {
+    for (const env of [stack.migrate, stack.auth, stack.core, stack.playbook]) {
       assertLoopbackDatabaseUrl(env.DATABASE_URL ?? '')
     }
   } catch (error) {
@@ -225,6 +225,7 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
     const wanted = [
       { name: 'auth', port: ports.auth },
       { name: 'core', port: ports.core },
+      { name: 'playbook', port: ports.playbook },
       { name: 'portal', port: ports.portal },
       ...notRunning,
     ]
@@ -364,6 +365,7 @@ export async function runUp(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       banner: () => {
         deps.say(`auth    ${where.auth}`)
         deps.say(`core    ${where.core}`)
+        deps.say(`playbook ${where.playbook}  (API and workers in one process)`)
         deps.say(`portal  ${where.portal}`)
         deps.say(
           `mailbox ${where.mail}  (Mailpit: read the sign-up codes and Invitation emails here)`

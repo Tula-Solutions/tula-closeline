@@ -84,6 +84,12 @@ describe('resolvePorts', () => {
     })
   })
 
+  test('the playbook port defaults to the one the portal expects and can be moved', () => {
+    expect(resolvePorts({}).playbook).toBe(3003)
+    expect(resolvePorts({ CLOSELINE_DEV_PLAYBOOK_PORT: '3013' }).playbook).toBe(3013)
+    expect(() => resolvePorts({ CLOSELINE_DEV_PLAYBOOK_PORT: '3001' })).toThrow('both 3001')
+  })
+
   test.each(['0', '65536', 'abc', '30.5', '-1'])('refuses %s, naming the variable', (value) => {
     expect(() => resolvePorts({ CLOSELINE_DEV_CORE_PORT: value })).toThrow(
       'CLOSELINE_DEV_CORE_PORT'
@@ -96,18 +102,20 @@ describe('resolvePorts', () => {
 })
 
 describe('secrets', () => {
-  test('are 64 hex characters from the random source, one for each role and the internal token', () => {
+  test('are 64 hex characters from the random source, one for each role, the internal token and the playbook token', () => {
     let counter = 0
     const secrets = generateSecrets((size) => Buffer.alloc(size, ++counter))
     expect(Object.keys(secrets.passwords).sort()).toEqual([...ROLES].sort())
     expect(secrets.internalToken).toMatch(/^[0-9a-f]{64}$/)
-    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 1)
+    expect(secrets.playbookToken).toMatch(/^[0-9a-f]{64}$/)
+    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 2)
   })
 
   test('differ on every run when the real generator is used', () => {
     const a = generateSecrets()
     const b = generateSecrets()
     expect(a.internalToken).not.toBe(b.internalToken)
+    expect(a.playbookToken).not.toBe(b.playbookToken)
     expect(a.passwords.closeline_auth).not.toBe(b.passwords.closeline_auth)
     expect(randomHex(16)).toMatch(/^[0-9a-f]{32}$/)
   })
@@ -207,11 +215,42 @@ describe('buildStackEnv', () => {
     expect(env.core.REGION).toBe(env.auth.REGION)
   })
 
-  test('the portal points at both services and core links back to the portal', () => {
+  test('the portal proxies to auth, core and the playbook, and core links back to the portal', () => {
     const env = build()
-    expect(env.portal.VITE_AUTH_BASE_URL).toBe('http://127.0.0.1:3001')
-    expect(env.portal.VITE_CORE_BASE_URL).toBe('http://127.0.0.1:3100')
+    expect(env.portal.AUTH_PROXY_TARGET).toBe('http://127.0.0.1:3001')
+    expect(env.portal.CORE_PROXY_TARGET).toBe('http://127.0.0.1:3100')
+    expect(env.portal.PLAYBOOK_PROXY_TARGET).toBe('http://127.0.0.1:3003')
     expect(env.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:3002')
+  })
+
+  test('the playbook verifies auth tokens like core and logs in as closeline_playbook', () => {
+    const env = build()
+    expect(env.playbook.ENVIRONMENT).toBe('local')
+    expect(env.playbook.PORT).toBe('3003')
+    expect(env.playbook.AUTH_ISSUER).toBe(env.auth.PUBLIC_URL)
+    expect(env.playbook.AUTH_AUDIENCE).toBe(env.auth.TOKEN_AUDIENCE)
+    expect(env.playbook.AUTH_JWKS_URL).toBe(`${env.auth.PUBLIC_URL}/.well-known/jwks.json`)
+    expect(env.playbook.DATABASE_URL).toBe(
+      `postgres://closeline_playbook:${secrets.passwords.closeline_playbook}@127.0.0.1:5440/closeline`
+    )
+  })
+
+  test('the playbook uses the compose queue and object storage, with its own internal secret', () => {
+    const env = build()
+    expect(env.playbook.QUEUE_ENDPOINT).toBe('http://127.0.0.1:9324')
+    expect(env.playbook.QUEUE_URL).toBe('http://127.0.0.1:9324/000000000000/closeline-playbook')
+    expect(env.playbook.STORAGE_ENDPOINT).toBe('http://127.0.0.1:9090')
+    expect(env.playbook.STORAGE_BUCKET).toBe('closeline-dev')
+    expect(env.playbook.INTERNAL_API_TOKENS).toBe(secrets.playbookToken)
+    expect(secrets.playbookToken).not.toBe(secrets.internalToken)
+    expect(JSON.stringify(env.core)).not.toContain(secrets.playbookToken)
+    expect(JSON.stringify(env.auth)).not.toContain(secrets.playbookToken)
+  })
+
+  test('the playbook gets no setting that would turn its in-process stand-ins off or on elsewhere', () => {
+    const env = build()
+    expect(env.playbook.WORKERS_ENABLED).toBeUndefined()
+    expect(env.playbook.SENTRY_DSN).toBeUndefined()
   })
 
   test('every service runs as local and each logs in as its own database role on the dev port', () => {
@@ -230,13 +269,14 @@ describe('buildStackEnv', () => {
     )
   })
 
-  test('a service never receives another role password: not the owner, postgres or playbook', () => {
+  test('a service never receives another role password: not the owner or postgres, nor that of another service', () => {
     const env = build()
     const own = {
       auth: secrets.passwords.closeline_auth,
       core: secrets.passwords.closeline_core,
+      playbook: secrets.passwords.closeline_playbook,
     }
-    for (const service of ['auth', 'core'] as const) {
+    for (const service of ['auth', 'core', 'playbook'] as const) {
       const text = JSON.stringify(env[service])
       for (const role of ROLES) {
         const password = secrets.passwords[role]
@@ -263,7 +303,7 @@ describe('buildStackEnv', () => {
     expect(env.compose.DOCKER_HOST).toBe('unix:///home/me/.colima/docker.sock')
     expect(env.compose.DOCKER_CONTEXT).toBe('colima')
     expect(env.compose.DOCKER_CONFIG).toBe('/home/me/.docker')
-    for (const child of [env.auth, env.core, env.portal, env.migrate]) {
+    for (const child of [env.auth, env.core, env.playbook, env.portal, env.migrate]) {
       expect(Object.keys(child).filter((name) => name.startsWith('DOCKER_'))).toEqual([])
     }
   })
@@ -296,8 +336,12 @@ describe('buildStackEnv', () => {
       AUTH_MASTER_KEY: 'a'.repeat(64),
       AWS_SECRET_ACCESS_KEY: 'secret',
     })
-    for (const child of [env.auth, env.core, env.portal, env.migrate]) {
+    for (const child of [env.auth, env.core, env.playbook, env.portal, env.migrate]) {
       expect(child.PATH).toBe('/usr/bin')
+      expect(child.AWS_SECRET_ACCESS_KEY).not.toBe('secret')
+    }
+    expect(env.playbook.AWS_SECRET_ACCESS_KEY).toBe('local')
+    for (const child of [env.auth, env.core, env.portal, env.migrate]) {
       expect(child.AWS_SECRET_ACCESS_KEY).toBeUndefined()
     }
     expect(env.auth.DATABASE_URL).not.toContain('prod')
@@ -419,11 +463,24 @@ describe('compose and migrate command lines', () => {
 describe('serviceDefinitions', () => {
   const definitions = serviceDefinitions('/bin/bun', DEFAULT_PORTS)
 
-  test('starts core before auth, which calls it, and keeps a stray .env out of every process', () => {
-    expect(definitions.map((definition) => definition.name)).toEqual(['core', 'auth', 'portal'])
+  test('starts core before auth, which calls it, then the playbook and the portal, with no stray .env', () => {
+    expect(definitions.map((definition) => definition.name)).toEqual([
+      'core',
+      'auth',
+      'playbook',
+      'portal',
+    ])
     for (const definition of definitions) {
       expect(definition.cmd.slice(0, 2)).toEqual(['/bin/bun', '--no-env-file'])
     }
+  })
+
+  test('the playbook is one process for the API and the workers, ready when /readyz answers', () => {
+    const playbook = definitions.find((definition) => definition.name === 'playbook')
+    expect(playbook?.sibling).toBe('playbook')
+    expect(playbook?.cmd).toEqual(['/bin/bun', '--no-env-file', 'src/server.ts'])
+    expect(playbook?.env).toBe('playbook')
+    expect(playbook?.readyUrl).toBe('http://127.0.0.1:3003/readyz')
   })
 
   test('the portal binds the loopback address on its own port and never moves to another', () => {
@@ -498,7 +555,7 @@ describe('checkSiblings', () => {
 
   test('is empty when every clone is there and installed', () => {
     const root = mkdtempSync(join(tmpdir(), 'closeline-dev-'))
-    for (const short of ['db', 'auth', 'core', 'portal']) {
+    for (const short of ['db', 'auth', 'core', 'playbook', 'portal']) {
       clone(root, short)
     }
     expect(checkSiblings(root)).toEqual([])
@@ -511,9 +568,10 @@ describe('checkSiblings', () => {
     clone(root, 'core', undefined, false)
     const problems = checkSiblings(root)
     expect(problems.some((p) => p.includes('tula-closeline-portal is missing'))).toBe(true)
+    expect(problems.some((p) => p.includes('tula-closeline-playbook is missing'))).toBe(true)
     expect(problems.some((p) => p.includes('is not tula-closeline-auth'))).toBe(true)
     expect(problems.some((p) => p.includes('tula-closeline-core has no node_modules'))).toBe(true)
-    expect(problems).toHaveLength(3)
+    expect(problems).toHaveLength(4)
   })
 
   test('asks for vite when the portal has node_modules without it', () => {
