@@ -159,6 +159,14 @@ describe('pre-commit', () => {
     expect(runHook(repo).exitCode).toBe(0)
   })
 
+  test("infra's real check script runs under the pinned Biome", () => {
+    const repo = repoWith('biome check --no-errors-on-unmatched .')
+    stage(repo, { 'src/a.ts': GOOD })
+    const result = runHook(repo)
+    expect(result.stderr.toString()).not.toContain('cannot be used multiple times')
+    expect(result.exitCode).toBe(0)
+  })
+
   test.each(['src/b c.ts', 'src/é.ts'])('a lint error in %s blocks the commit', (name) => {
     const repo = repoWith('biome check src')
     stage(repo, { [name]: BAD })
@@ -183,8 +191,10 @@ describe('pre-commit', () => {
     ['biome check src scripts bench', [], [...src, 'bench/b.ts']],
     ['biome check src bench scripts', [], [...src, 'bench/b.ts']],
     ['biome check src scripts test vite.config.ts', [], [...src, 'test/t.ts', 'vite.config.ts']],
-    ['biome check --no-errors-on-unmatched .', ['--no-errors-on-unmatched'], tracked],
-    ['biome check --write src', ['--write'], ['src/a.ts']],
+    // The hook passes --write and --no-errors-on-unmatched itself, so it must not repeat them.
+    ['biome check --no-errors-on-unmatched .', [], tracked],
+    ['biome check --write src', [], ['src/a.ts']],
+    ['biome check --max-diagnostics=50 src', ['--max-diagnostics=50'], ['src/a.ts']],
   ]
 
   test.each(parsed)('parses %s', (script, flags, linted) => {
@@ -203,6 +213,8 @@ describe('pre-commit', () => {
       .split('\n')
       .filter((arg) => arg && arg !== '--')
     expect(args.slice(0, 4)).toEqual(['biome', 'check', '--write', '--no-errors-on-unmatched'])
+    const given = args.filter((arg) => arg.startsWith('-'))
+    expect(new Set(given).size).toBe(given.length)
     expect(args.slice(4).filter((arg) => arg.startsWith('-'))).toEqual(flags)
     expect(
       args
@@ -211,6 +223,19 @@ describe('pre-commit', () => {
         .sort()
     ).toEqual([...linted].sort())
   })
+
+  test.each(['biome check --max-diagnostics=50 --max-diagnostics=60 src', 'biome check -- src'])(
+    'fails loudly on the check script %s',
+    (script) => {
+      const repo = repoWith(script)
+      stage(repo, { 'src/a.ts': GOOD })
+
+      const result = runHook(repo)
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr.toString()).toContain('check script')
+    }
+  )
 
   test.each(['bunx biome check src', 'biome check src && echo x', 'biome check src | cat', 'tsc'])(
     'fails loudly on the check script %s',
