@@ -52,12 +52,13 @@ it should be, has no `node_modules`, or a port is taken.
 | auth | `http://127.0.0.1:3001` | `bun src/server.ts` in `tula-closeline-auth` |
 | playbook | `http://127.0.0.1:3003` | `bun src/server.ts` in `tula-closeline-playbook`: the API, the ingestion job loop (documents, Calls, Recordings, Deal imports) and the sweeps, all in this one process (see "The playbook" below) |
 | portal | `http://127.0.0.1:3002` | Vite dev server in `tula-closeline-portal` |
+| fake Google | `http://127.0.0.1:3010` | `bun scripts/dev-fake-google.ts` in this repo, started only when no `GOOGLE_*` is set in your shell (see "Sign in with Google" below) |
 
 Ports 5434 to 5437 are the repos' own test databases and 5432 is left for whatever else you run, so
 the dev Postgres is on 5440. Mailpit's usual port 8025 is often taken by another project's mailbox,
 so this one is on 8026. Override any port with `CLOSELINE_DEV_POSTGRES_PORT`,
 `CLOSELINE_DEV_QUEUE_PORT`, `CLOSELINE_DEV_STORAGE_PORT`, `CLOSELINE_DEV_MAIL_PORT`,
-`CLOSELINE_DEV_AUTH_PORT`, `CLOSELINE_DEV_CORE_PORT`, `CLOSELINE_DEV_PLAYBOOK_PORT` and `CLOSELINE_DEV_PORTAL_PORT`. Every port binds to `127.0.0.1` only.
+`CLOSELINE_DEV_AUTH_PORT`, `CLOSELINE_DEV_CORE_PORT`, `CLOSELINE_DEV_PLAYBOOK_PORT`, `CLOSELINE_DEV_PORTAL_PORT` and `CLOSELINE_DEV_FAKE_GOOGLE_PORT` (3010). Every port binds to `127.0.0.1` only.
 Every image is pinned to an exact version and digest in `compose.dev.yaml`.
 
 Why these stand-ins: ADR 0001 gives each Region its own queues, and the plan (steps 1.10, 1.12 and
@@ -95,6 +96,58 @@ dev server proxies `/v1/client` to auth, `/v1/organization`, `/v1/members`, `/v1
 `/v1/teams` to core and `/v1/playbook` to the playbook. The script gives it the three targets the
 portal reads (`AUTH_PROXY_TARGET`, `CORE_PROXY_TARGET`, `PLAYBOOK_PROXY_TARGET`, see the portal's
 `.env.example`) and no other service setting. Nothing in the portal needs to change.
+
+## Sign in with Google
+
+Auth's Sign in with Google (ADR 0019) needs an OpenID provider. `bun run dev` gives it one of two:
+
+**The fake provider (the default).** With none of `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` and
+`GOOGLE_REDIRECT_URI` set in the shell you run `bun run dev` from, the script starts
+`scripts/dev-fake-google.ts` on `127.0.0.1:3010` (first of the processes, stopped with the stack,
+including by `--down`) and gives:
+
+- auth: `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (fixed development values),
+  `GOOGLE_REDIRECT_URI=http://127.0.0.1:3002/v1/client/google/callback` (the portal's own origin and
+  port, so the portal's proxy serves the callback) and `GOOGLE_ISSUER_URL=http://127.0.0.1:3010`
+  (auth accepts it only with `ENVIRONMENT=local`);
+- the portal: `VITE_GOOGLE_FAKE_ISSUER_HOST=127.0.0.1:3010`, the one host the browser may be sent to
+  besides Google.
+
+"Continue with Google" then opens a plain HTML page on the fake: type any email (or arrive with a
+`login_hint`) and submit. The fake checks the client id and secret, the redirect URI and PKCE (S256)
+and returns an RS256 ID token with `iss`, `aud`, `nonce`, `email`, `email_verified: true` and a `sub`
+that is the same for the same email, so signing in again is recognised. No Google account, no
+network and no secret is involved; nothing is stored beyond the running process.
+
+The fake binds `127.0.0.1` only. **With a tunnel (`CLOSELINE_DEV_PUBLIC_ORIGIN`) and the fake
+provider, the Google flow works only from the machine running the stack**: the authorization page
+and the redirect back are on loopback addresses, which another device cannot reach. Use real Google
+for a flow from another device.
+
+**Real Google.** Set all three in the shell before `bun run dev` and no fake is started and no
+issuer override is passed:
+
+```bash
+GOOGLE_CLIENT_ID=... GOOGLE_CLIENT_SECRET=... \
+GOOGLE_REDIRECT_URI=http://127.0.0.1:3002/v1/client/google/callback bun run dev
+```
+
+Create an OAuth client of type "Web application" in the Google Cloud Console (APIs and Services,
+Credentials) and add these under "Authorized redirect URIs", exactly:
+
+- `http://127.0.0.1:3002/v1/client/google/callback` (this machine; change the port if you moved the
+  portal);
+- `https://<tunnel-host>/v1/client/google/callback` (when you use a tunnel).
+
+With `CLOSELINE_DEV_PUBLIC_ORIGIN` set, you choose which one `GOOGLE_REDIRECT_URI` is: the tunnel one
+to sign in through the tunnel, the loopback one to sign in on this machine. The script refuses any
+other value (it must be the callback path on the portal origin or on the tunnel origin), and refuses
+a mix (only some of the three set) naming the missing variable, never a value. The client secret is
+scrubbed from the services' output like the generated secrets. `GOOGLE_ISSUER_URL` in your shell is
+ignored.
+
+`bun run dev:smoke` covers the fake provider (see below) and skips the Google steps, with the
+reason, when the stack uses real Google or has Google off.
 
 ## Order of a start
 
@@ -176,6 +229,7 @@ the stack and runs `bun run dev:smoke --strict`, a person runs it.
 | create a Team | `POST /v1/teams` as the first user, for the isolation checks |
 | a second sign-up cannot read the first Organization | a second, different user gets a different Organization id. Reads: `GET /v1/organization`, `/v1/members`, `/v1/invitations` and `/v1/teams` with their token return nothing of the first (its Organization id, address, user and membership ids, Invitation and Team ids). The first Organization id sent in an `x-organization-id` header or an `organizationId` query with the second token is ignored or refused. Writes by id with the second token against the first Organization (`DELETE /v1/invitations/{id}`, `PATCH` and `DELETE /v1/teams/{id}`, `POST /v1/teams/{id}/members`, `PATCH /v1/members/{id}`, `POST /v1/invitations` with its `teamId`) each answer `404` with the documented code (`invitation.not_found`, `team.not_found`, `member.not_found`), and the first Organization is unchanged. Positive control: the first user then renames and deletes their own Team and revokes their own Invitation, so a route that answers `404` to everyone fails |
 | **Sales history** (below): confirm the rights wording; upload a Transcript; the first Call created its Deal, open; the Transcript is processed into Moments; upload a Recording; the Recording is transcribed; import a three-row Deal CSV; the import is applied; the Outcome reaches the Moments; a second Organization cannot see any of it; delete the Call and it is gone | the playbook, as the Owner, through its public routes only |
+| **Sign in with Google** (nine steps, `google: ...`): `auth-options` says Google is on; `start` returns an authorization URL on the fake provider; the provider's page is served; approving a fresh email redirects to the portal's callback; the callback through the portal sends a new person to `/sign-up/google?attempt=`; `complete` with an Organization name (sending the attempt cookie and the portal's `Origin`) gives a session and a refresh cookie; `/v1/client/me` shows the person; a second sign-in with the same email goes straight to the app with a refresh cookie; a replayed callback goes to `/sign-in?error=oidc.state_invalid` | auth's Google routes end to end against `scripts/dev-fake-google.ts`, playing the browser. Only a URL on the fake provider's own address is followed. If Google is off, or the stack uses real Google (which needs a person), the steps are skipped with the reason, so `--strict` fails |
 | a replayed refresh token is refused and ends its session | last, on a throwaway sign-in: refresh twice, replay the first token, expect `401 session.reuse_detected`, then expect the newest token to be refused too (the contract says reuse ends the whole session) |
 
 A step whose earlier step failed or was skipped is skipped as `blocked by "<step>" (failed)`, so one
@@ -235,6 +289,9 @@ A Cloudflare quick tunnel can put the portal on a public `https` address:
 path, query or trailing slash, and ASCII only (no punycode). An invalid value stops `bun run dev`
 before anything starts. When it is set, auth also accepts that origin for sessions and the portal's
 Vite dev server allows its host. When it is unset nothing changes.
+
+Sign in with Google through the tunnel needs real Google with the tunnel's redirect URI; the fake
+provider is loopback only (see "Sign in with Google").
 
 The host is allowed through `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, which is Vite-internal and
 undocumented. It was checked against Vite 8.3.4; if Vite drops it, the tunnel fails as "Blocked
