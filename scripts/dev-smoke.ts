@@ -7,6 +7,7 @@
 // to; the services have no other way in for the test and none is added. No code, token, password,
 // link or address is printed: every message is scrubbed of the values this run has seen.
 import { origins, randomHex, requestWithRetry, resolvePorts } from './dev-lib.ts'
+import { runGoogleSteps } from './dev-smoke-google.ts'
 
 /** How a step ended. */
 export type StepStatus = 'pass' | 'fail' | 'skip'
@@ -21,6 +22,8 @@ export type SmokeTargets = {
   playbook: string
   portal: string
   mail: string
+  /** The fake Google provider; without it the Google steps cannot tell the fake from real Google. */
+  fakeGoogle?: string
 }
 
 /** Tunables of a run; the defaults are what the CLI uses. */
@@ -193,7 +196,7 @@ export async function runSmoke(
 ): Promise<StepResult[]> {
   const results: StepResult[] = []
   const seen = new Set<string>()
-  const remember = (...values: (string | undefined)[]) => {
+  const remember = (...values: (string | null | undefined)[]) => {
     for (const value of values) {
       if (value) {
         seen.add(value)
@@ -1586,6 +1589,19 @@ export async function runSmoke(
       return fail('deleting a deleted Call again did not answer 200 deleted')
     }
     return pass('state deleted, out of search and out of the list')
+  })
+
+  // Sign in with Google, against the stack's fake provider. Independent of the account steps.
+  await runGoogleSteps({
+    targets,
+    request,
+    step: async (name, body) => {
+      await step(name, body)
+      return results.at(-1)?.status ?? 'fail'
+    },
+    record: (result) => results.push(result),
+    remember,
+    runId,
   })
 
   // Last, on a session made only for this: reusing a refresh token may end the whole session.

@@ -92,6 +92,19 @@ export type FakeOptions = {
   trustOrganizationHeader?: boolean
   /** What is broken in the playbook: see dev-smoke-playbook-fake.ts. */
   playbook?: PlaybookFakeOptions
+  /**
+   * Sign in with Google. `off`: auth-options says Google is off. `real`: the authorization URL is
+   * on accounts.google.com. The rest break one thing: a callback that can be replayed, a returning
+   * person treated as new, no refresh cookie, a broken /me, a refused complete.
+   */
+  google?:
+    | 'off'
+    | 'real'
+    | 'replay-accepted'
+    | 'returning-is-new'
+    | 'no-refresh-cookie'
+    | 'me-broken'
+    | 'complete-refused'
 }
 
 type Mail = { id: string; to: string; subject: string; text: string; visibleAt: number }
@@ -114,7 +127,31 @@ export function fakeStack(options: FakeOptions = {}) {
   const teams: { id: string; orgId: string; name: string }[] = []
   let counter = 0
   const next = (prefix: string) => `${prefix}_${++counter}_${crypto.randomUUID().slice(0, 8)}`
-  const origins = { portal: '', auth: '' }
+  const origins = { portal: '', auth: '', google: '' }
+  // Sign in with Google: attempts by id, the stub issuer's codes, and what the report must not hold.
+  const googleAttempts = new Map<
+    string,
+    { secret: string; state: string; spent: boolean; email?: string }
+  >()
+  const googleCodes = new Map<string, string>()
+  const googleEmails: string[] = []
+  const googleSecrets: string[] = []
+  const portalPaths: string[] = []
+  let googleAuthorizeHits = 0
+  const redirect = (location: string, cookies: string[] = []) => {
+    const headers = new Headers({ location })
+    for (const cookie of cookies) {
+      headers.append('set-cookie', cookie)
+    }
+    return new Response(null, { status: 302, headers })
+  }
+  const cookieValue = (request: Request, name: string) =>
+    request.headers
+      .get('cookie')
+      ?.split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith(`${name}=`))
+      ?.slice(name.length + 1)
 
   const json = (body: unknown, status = 200) => Response.json(body, { status })
   const error = (status: number, code: string) => json({ error: { code } }, status)
@@ -279,6 +316,119 @@ export function fakeStack(options: FakeOptions = {}) {
       }
       const issued = issue(user.userId, user.orgId, found.sid, token)
       return json(options.reuseRefreshToken ? { ...issued, refreshToken: token } : issued)
+    }
+    if (path === '/v1/client/auth-options' && request.method === 'GET') {
+      return json({ providers: { google: options.google !== 'off' } })
+    }
+    if (path === '/v1/client/me' && request.method === 'GET') {
+      const session = sessions.get(
+        (request.headers.get('authorization') ?? '').replace(/^Bearer /, '')
+      )
+      const entry = session
+        ? [...users.entries()].find(([, user]) => user.userId === session.userId)
+        : undefined
+      if (!entry || options.google === 'me-broken') {
+        return error(401, 'auth.token_invalid')
+      }
+      return json({ id: entry[1].userId, email: entry[0] })
+    }
+    if (path === '/v1/client/google/start' && request.method === 'POST') {
+      if (request.headers.get('origin') !== origins.portal) {
+        return error(403, 'auth.forbidden')
+      }
+      const id = next('goa')
+      const secret = next('goc')
+      const state = `${id}.${crypto.randomUUID()}`
+      googleAttempts.set(id, { secret, state, spent: false })
+      googleSecrets.push(id, secret, state)
+      const authorize = new URL(
+        options.google === 'real'
+          ? 'https://accounts.google.com/o/oauth2/v2/auth'
+          : `${origins.google}/authorize`
+      )
+      authorize.searchParams.set('client_id', 'fake-client')
+      authorize.searchParams.set('redirect_uri', `${origins.portal}/v1/client/google/callback`)
+      authorize.searchParams.set('response_type', 'code')
+      authorize.searchParams.set('state', state)
+      authorize.searchParams.set('nonce', crypto.randomUUID())
+      authorize.searchParams.set('code_challenge', 'x'.repeat(43))
+      authorize.searchParams.set('code_challenge_method', 'S256')
+      return new Response(JSON.stringify({ authorizationUrl: authorize.toString() }), {
+        headers: {
+          'content-type': 'application/json',
+          'set-cookie': `tula_oidc=${secret}; Path=/v1/client/google/; Max-Age=600; HttpOnly; SameSite=Lax`,
+        },
+      })
+    }
+    if (path === '/v1/client/google/callback' && request.method === 'GET') {
+      const state = url.searchParams.get('state') ?? ''
+      const attempt = googleAttempts.get(state.split('.')[0] ?? '')
+      const code = url.searchParams.get('code') ?? ''
+      if (
+        !attempt ||
+        attempt.state !== state ||
+        cookieValue(request, 'tula_oidc') !== attempt.secret ||
+        (attempt.spent && options.google !== 'replay-accepted')
+      ) {
+        return redirect('/sign-in?error=oidc.state_invalid')
+      }
+      attempt.spent = true
+      const email = googleCodes.get(code)
+      if (!email) {
+        return redirect('/sign-in?error=oidc.state_invalid')
+      }
+      const known = users.get(email)
+      if (known && options.google !== 'returning-is-new') {
+        const session = issue(known.userId, known.orgId)
+        googleSecrets.push(session.refreshToken)
+        return redirect(
+          '/',
+          options.google === 'no-refresh-cookie'
+            ? []
+            : [
+                `tula_refresh=${session.refreshToken}; Path=/v1/client/sessions/; HttpOnly; SameSite=Strict`,
+              ]
+        )
+      }
+      attempt.email = email
+      return redirect(`/sign-up/google?attempt=${state.split('.')[0]}`)
+    }
+    if (path === '/v1/client/google/complete' && request.method === 'POST') {
+      if (request.headers.get('origin') !== origins.portal) {
+        return error(403, 'auth.forbidden')
+      }
+      const attempt = googleAttempts.get(String(body.attemptId))
+      if (
+        !attempt?.email ||
+        cookieValue(request, 'tula_oidc') !== attempt.secret ||
+        options.google === 'complete-refused' ||
+        typeof body.organizationName !== 'string'
+      ) {
+        return error(422, 'oidc.state_invalid')
+      }
+      const userId = next('usr')
+      const orgId = next('org')
+      users.set(attempt.email, { password: '', orgId, userId })
+      orgs.set(orgId, body.organizationName)
+      members.push({ id: next('mem'), userId, orgId, role: 'owner' })
+      const session = issue(userId, orgId)
+      googleSecrets.push(session.refreshToken)
+      const { refreshToken, ...browser } = session
+      return new Response(
+        JSON.stringify({
+          id: String(body.attemptId),
+          kind: 'sign_up',
+          expiresAt: new Date(Date.now() + 600_000).toISOString(),
+          step: { status: 'complete' },
+          session: browser,
+        }),
+        {
+          headers: {
+            'content-type': 'application/json',
+            'set-cookie': `tula_refresh=${refreshToken}; Path=/v1/client/sessions/; HttpOnly; SameSite=Strict`,
+          },
+        }
+      )
     }
     if (path === '/.well-known/jwks.json') {
       return json({ keys: [{ kty: 'OKP', alg: 'EdDSA', kid: 'k' }] })
@@ -549,10 +699,12 @@ export function fakeStack(options: FakeOptions = {}) {
         }
         if (which === 'portal' && url.pathname.startsWith('/v1/client/')) {
           // The portal's dev server proxies /v1/client/... to auth, keeping the Origin header.
-          return fetch(`${origins.auth}${url.pathname}`, {
+          portalPaths.push(url.pathname)
+          return fetch(`${origins.auth}${url.pathname}${url.search}`, {
             method: request.method,
             headers: request.headers,
             body: raw === '' ? undefined : raw,
+            redirect: 'manual',
           })
         }
         if (which === 'portal') {
@@ -574,7 +726,36 @@ export function fakeStack(options: FakeOptions = {}) {
       },
     })
 
+  // A stand-in for the fake Google provider: a page, and an approval that redirects with a code.
+  const googleServer = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      if (url.pathname !== '/authorize') {
+        return new Response('not found', { status: 404 })
+      }
+      googleAuthorizeHits++
+      if (request.method === 'GET') {
+        return new Response('<!doctype html><form method="post"><input name="email"></form>', {
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        })
+      }
+      const form = new URLSearchParams(await request.text())
+      const email = (form.get('email') ?? '').toLowerCase()
+      const code = next('gcode')
+      googleCodes.set(code, email)
+      googleEmails.push(email)
+      googleSecrets.push(email, code)
+      const back = new URL(form.get('redirect_uri') ?? '')
+      back.searchParams.set('code', code)
+      back.searchParams.set('state', form.get('state') ?? '')
+      return redirect(back.toString())
+    },
+  })
+
   const servers = {
+    google: googleServer,
     auth: serve('auth'),
     core: serve('core'),
     portal: serve('portal'),
@@ -584,10 +765,18 @@ export function fakeStack(options: FakeOptions = {}) {
   const origin = (name: keyof typeof servers) => `http://127.0.0.1:${servers[name].port}`
   origins.portal = origin('portal')
   origins.auth = origin('auth')
+  origins.google = origin('google')
   return {
     seen,
     mailbox,
+    googleEmails,
+    googleSecrets,
+    portalPaths,
+    get googleAuthorizeHits() {
+      return googleAuthorizeHits
+    },
     targets: {
+      fakeGoogle: origin('google'),
       auth: origin('auth'),
       core: origin('core'),
       playbook: origin('playbook'),
