@@ -238,7 +238,9 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       return failed()
     }
     const { stack, quick } = ready
-    const redactions = secretValues(deps.secrets)
+    // The developer's own Google client secret, when there is one, is scrubbed like the generated ones.
+    const googleSecret = stack.fakeGoogle ? undefined : stack.auth.GOOGLE_CLIENT_SECRET
+    const redactions = [...secretValues(deps.secrets), ...(googleSecret ? [googleSecret] : [])]
 
     const problems = deps.siblingProblems(ctx.root)
     const hasCompose = (await deps.capture(['docker', 'compose', 'version'], quick)) !== undefined
@@ -279,6 +281,7 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       { name: 'core', port: ports.core },
       { name: 'playbook', port: ports.playbook },
       { name: 'portal', port: ports.portal },
+      ...(stack.fakeGoogle ? [{ name: 'fake Google', port: ports.fakeGoogle }] : []),
       ...notRunning,
     ]
     const busy = await deps.busy(wanted)
@@ -399,16 +402,18 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
 
     const where = origins(ports)
     return await deps.supervise({
-      services: serviceDefinitions(ctx.execPath, ports).map((definition) => ({
-        name: definition.name,
-        readyUrl: definition.readyUrl,
-        spawn: () =>
-          deps.spawn(definition.name, definition.cmd, {
-            cwd: siblingDir(ctx.root, definition.sibling),
-            env: stack[definition.env],
-            secrets: redactions,
-          }),
-      })),
+      services: serviceDefinitions(ctx.execPath, ports, stack.fakeGoogle !== undefined).map(
+        (definition) => ({
+          name: definition.name,
+          readyUrl: definition.readyUrl,
+          spawn: () =>
+            deps.spawn(definition.name, definition.cmd, {
+              cwd: definition.sibling ? siblingDir(ctx.root, definition.sibling) : ctx.hub,
+              env: stack[definition.env] ?? {},
+              secrets: redactions,
+            }),
+        })
+      ),
       probe: () => deps.probe({ coreOrigin: where.core, token: deps.secrets.internalToken }),
       waitReady: deps.waitReady,
       subscribe: (onSignal) => interrupt.handOver(onSignal),
@@ -419,6 +424,11 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
         deps.say(`core    ${where.core}`)
         deps.say(`playbook ${where.playbook}  (API and workers in one process)`)
         deps.say(`portal  ${where.portal}`)
+        deps.say(
+          stack.fakeGoogle
+            ? `fake Google ${where.fakeGoogle}  (Sign in with Google as any email; loopback only, so only from this machine)`
+            : 'Sign in with Google: real Google, with the GOOGLE_* settings of this shell'
+        )
         deps.say(
           `mailbox ${where.mail}  (Mailpit: read the sign-up codes and Invitation emails here)`
         )

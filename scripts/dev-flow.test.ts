@@ -26,6 +26,8 @@ type Call = {
   cmd: string[]
   secrets?: readonly string[]
   stdin?: string
+  cwd?: string
+  env?: Record<string, string>
 }
 
 /** A harness with fake run/capture/spawn/supervise that records every call in order. */
@@ -82,7 +84,7 @@ function harness(
       return ''
     },
     spawn: (name, cmd, opts) => {
-      calls.push({ kind: 'spawn', name, cmd, secrets: opts.secrets })
+      calls.push({ kind: 'spawn', name, cmd, secrets: opts.secrets, cwd: opts.cwd, env: opts.env })
       const child: ManagedChild = {
         name,
         alive: () => true,
@@ -198,9 +200,59 @@ describe('runUp order', () => {
       'logins',
       'rotate',
       'migrate',
-      'core',
+      'fake-google',
     ])
     expect(h.supervised()).toBe(true)
+  })
+
+  test('starts the fake Google provider first, from the hub, with its own environment, and says so', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    const spawned = h.calls.filter((call) => call.kind === 'spawn')
+    expect(spawned.map((call) => call.name)).toEqual([
+      'fake-google',
+      'core',
+      'auth',
+      'playbook',
+      'portal',
+    ])
+    expect(spawned[0]?.cmd).toEqual([
+      h.context.execPath,
+      '--no-env-file',
+      'scripts/dev-fake-google.ts',
+    ])
+    expect(spawned[0]?.cwd).toBe('/hub')
+    expect(spawned[0]?.env?.FAKE_GOOGLE_PORT).toBe('3010')
+    expect(spawned[1]?.cwd).toBe('/clones/tula-closeline-core')
+    expect(h.said.some((line) => line.includes('fake Google') && line.includes(':3010'))).toBe(true)
+  })
+
+  test('with real Google settings no fake is started or its port checked', async () => {
+    const h = harness({
+      parentEnv: {
+        PATH: '/usr/bin',
+        GOOGLE_CLIENT_ID: 'id',
+        GOOGLE_CLIENT_SECRET: 'secret-value-xyz',
+        GOOGLE_REDIRECT_URI: 'http://127.0.0.1:3002/v1/client/google/callback',
+      },
+    })
+    await runUp(h.context, h.deps)
+    expect(h.calls.some((call) => call.name === 'fake-google')).toBe(false)
+    expect(h.busyAsked.map((wanted) => wanted.name)).not.toContain('fake Google')
+    expect(h.said.some((line) => line.includes('real Google'))).toBe(true)
+  })
+
+  test('a half-set real Google configuration stops the start before any command', async () => {
+    const h = harness({ parentEnv: { PATH: '/usr/bin', GOOGLE_CLIENT_ID: 'id' } })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.calls).toEqual([])
+    expect(h.failed.join('\n')).toContain('GOOGLE_CLIENT_SECRET')
+  })
+
+  test('a busy fake Google port stops the start', async () => {
+    const h = harness({ busy: ['port 3010 (fake Google) is already in use'] })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.busyAsked.map((wanted) => wanted.name)).toContain('fake Google')
   })
 
   test('starts the playbook after the migration, from the playbook clone, with its own environment', async () => {
@@ -395,12 +447,41 @@ describe('redaction reaches every step', () => {
     await runUp(h.context, h.deps)
     const steps = h.calls.filter((call) => call.kind !== 'capture')
     const names = steps.map((call) => call.name)
-    expect(names).toEqual(['compose', 'compose', 'migrate', 'core', 'auth', 'playbook', 'portal'])
+    expect(names).toEqual([
+      'compose',
+      'compose',
+      'migrate',
+      'fake-google',
+      'core',
+      'auth',
+      'playbook',
+      'portal',
+    ])
     for (const call of steps) {
       expect(call.secrets).toHaveLength(ALL_SECRETS.length)
       expect([...(call.secrets ?? [])].sort()).toEqual([...ALL_SECRETS].sort())
     }
     expect(ALL_SECRETS.length).toBeGreaterThanOrEqual(7)
+  })
+})
+
+describe('a real Google client secret', () => {
+  test('is scrubbed from the output of every service, and the fake secret is not treated as one', async () => {
+    const real = 'real-client-secret-0123456789'
+    const h = harness({
+      parentEnv: {
+        PATH: '/usr/bin',
+        GOOGLE_CLIENT_ID: 'id',
+        GOOGLE_CLIENT_SECRET: real,
+        GOOGLE_REDIRECT_URI: 'http://127.0.0.1:3002/v1/client/google/callback',
+      },
+    })
+    await runUp(h.context, h.deps)
+    const services = h.calls.filter((call) => call.kind === 'spawn')
+    expect(services.length).toBe(4)
+    for (const call of services) {
+      expect(call.secrets).toContain(real)
+    }
   })
 })
 
@@ -694,12 +775,13 @@ describe('ports of a stack that is partly up', () => {
     expect(asked).not.toContain('object storage stand-in')
   })
 
-  test('a stack that is fully up has no compose port checked, only the four services', async () => {
+  test('a stack that is fully up has no compose port checked, only the services and the fake Google', async () => {
     const h = harness({ running: every })
     await runUp(h.context, h.deps)
     expect(h.busyAsked.map((wanted) => wanted.name).sort()).toEqual([
       'auth',
       'core',
+      'fake Google',
       'playbook',
       'portal',
     ])

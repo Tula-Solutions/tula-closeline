@@ -156,21 +156,15 @@ describe('the fake Google provider', () => {
   })
 
   test('sub is stable per email and differs between emails', async () => {
-    const first = claimsOf(
-      ((await (await exchange(tokenBody(await approve('same@example.com')))).json()) as never)[
-        'id_token'
-      ]
-    )
-    const again = claimsOf(
-      ((await (await exchange(tokenBody(await approve('SAME@example.com')))).json()) as never)[
-        'id_token'
-      ]
-    )
-    const other = claimsOf(
-      ((await (await exchange(tokenBody(await approve('other@example.com')))).json()) as never)[
-        'id_token'
-      ]
-    )
+    const claimsFor = async (email: string) => {
+      const answer = (await (await exchange(tokenBody(await approve(email)))).json()) as {
+        id_token: string
+      }
+      return claimsOf(answer.id_token)
+    }
+    const first = await claimsFor('same@example.com')
+    const again = await claimsFor('SAME@example.com')
+    const other = await claimsFor('other@example.com')
     expect(first.sub).toBe(again.sub)
     expect(first.sub).toBe(subjectOf('same@example.com'))
     expect(first.sub).not.toBe(other.sub)

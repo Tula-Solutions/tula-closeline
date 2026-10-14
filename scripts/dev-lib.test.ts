@@ -5,6 +5,7 @@ import { createHash, createHmac, pbkdf2Sync } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { FAKE_GOOGLE_CLIENT_ID, FAKE_GOOGLE_CLIENT_SECRET } from './dev-fake-google.ts'
 import {
   acquireStartLock,
   assertLoopbackDatabaseUrl,
@@ -1132,5 +1133,140 @@ describe('processStart', () => {
         }
       }
     }
+  })
+})
+
+describe('Sign in with Google in the dev stack', () => {
+  const secrets = generateSecrets()
+  const build = (parent: Record<string, string | undefined> = {}, ports = DEFAULT_PORTS) =>
+    buildStackEnv({ parent, ports, secrets, dbDir: '/db' })
+  const CALLBACK = 'http://127.0.0.1:3002/v1/client/google/callback'
+  const real = {
+    GOOGLE_CLIENT_ID: 'real-id.apps.googleusercontent.com',
+    GOOGLE_CLIENT_SECRET: 'real-secret-value',
+    GOOGLE_REDIRECT_URI: CALLBACK,
+  }
+
+  test('the fake provider has its own port, free of the stack and movable', () => {
+    expect(DEFAULT_PORTS.fakeGoogle).toBe(3010)
+    expect(resolvePorts({ CLOSELINE_DEV_FAKE_GOOGLE_PORT: '3011' }).fakeGoogle).toBe(3011)
+    expect(() => resolvePorts({ CLOSELINE_DEV_FAKE_GOOGLE_PORT: '3001' })).toThrow('both 3001')
+  })
+
+  test('with no Google settings in the shell, auth talks to the fake and the portal trusts its host', () => {
+    const env = build()
+    expect(env.auth.GOOGLE_CLIENT_ID).toBe(FAKE_GOOGLE_CLIENT_ID)
+    expect(env.auth.GOOGLE_CLIENT_SECRET).toBe(FAKE_GOOGLE_CLIENT_SECRET)
+    expect(env.auth.GOOGLE_REDIRECT_URI).toBe(CALLBACK)
+    expect(env.auth.GOOGLE_ISSUER_URL).toBe('http://127.0.0.1:3010')
+    expect(env.portal.VITE_GOOGLE_FAKE_ISSUER_HOST).toBe('127.0.0.1:3010')
+    expect(env.fakeGoogle).toEqual({
+      ...baseChildEnv({}),
+      FAKE_GOOGLE_PORT: '3010',
+      FAKE_GOOGLE_CLIENT_ID: FAKE_GOOGLE_CLIENT_ID,
+      FAKE_GOOGLE_CLIENT_SECRET: FAKE_GOOGLE_CLIENT_SECRET,
+      FAKE_GOOGLE_REDIRECT_URI: CALLBACK,
+    })
+  })
+
+  test('the fake and the redirect URI follow moved ports', () => {
+    const env = build(
+      {},
+      resolvePorts({
+        CLOSELINE_DEV_FAKE_GOOGLE_PORT: '4410',
+        CLOSELINE_DEV_PORTAL_PORT: '4402',
+      })
+    )
+    expect(env.auth.GOOGLE_REDIRECT_URI).toBe('http://127.0.0.1:4402/v1/client/google/callback')
+    expect(env.auth.GOOGLE_ISSUER_URL).toBe('http://127.0.0.1:4410')
+    expect(env.portal.VITE_GOOGLE_FAKE_ISSUER_HOST).toBe('127.0.0.1:4410')
+    expect(env.fakeGoogle?.FAKE_GOOGLE_REDIRECT_URI).toBe(env.auth.GOOGLE_REDIRECT_URI)
+  })
+
+  test('empty Google variables count as unset', () => {
+    const env = build({ GOOGLE_CLIENT_ID: '', GOOGLE_CLIENT_SECRET: '', GOOGLE_REDIRECT_URI: '' })
+    expect(env.auth.GOOGLE_ISSUER_URL).toBe('http://127.0.0.1:3010')
+  })
+
+  test('real Google settings pass through with no fake and no issuer override', () => {
+    const env = build(real)
+    expect(env.auth.GOOGLE_CLIENT_ID).toBe(real.GOOGLE_CLIENT_ID)
+    expect(env.auth.GOOGLE_CLIENT_SECRET).toBe(real.GOOGLE_CLIENT_SECRET)
+    expect(env.auth.GOOGLE_REDIRECT_URI).toBe(CALLBACK)
+    expect(env.auth.GOOGLE_ISSUER_URL).toBeUndefined()
+    expect(env.portal.VITE_GOOGLE_FAKE_ISSUER_HOST).toBeUndefined()
+    expect(env.fakeGoogle).toBeUndefined()
+  })
+
+  test('a GOOGLE_ISSUER_URL in the shell never reaches auth, with real settings or without', () => {
+    expect(build({ ...real, GOOGLE_ISSUER_URL: 'http://evil.test' }).auth.GOOGLE_ISSUER_URL).toBe(
+      undefined
+    )
+    expect(build({ GOOGLE_ISSUER_URL: 'http://evil.test' }).auth.GOOGLE_ISSUER_URL).toBe(
+      'http://127.0.0.1:3010'
+    )
+  })
+
+  test.each([['GOOGLE_CLIENT_ID'], ['GOOGLE_CLIENT_SECRET'], ['GOOGLE_REDIRECT_URI']])(
+    'real settings missing %s are refused, naming the variable and not the secret',
+    (missing) => {
+      const half = { ...real, [missing]: undefined }
+      let message = ''
+      try {
+        build(half)
+      } catch (error) {
+        message = error instanceof Error ? error.message : ''
+      }
+      expect(message).toContain(missing)
+      expect(message).not.toContain(real.GOOGLE_CLIENT_SECRET)
+    }
+  )
+
+  test('a redirect URI that is not on the portal origin or the tunnel is refused', () => {
+    expect(() =>
+      build({
+        ...real,
+        GOOGLE_REDIRECT_URI: 'https://elsewhere.example.com/v1/client/google/callback',
+      })
+    ).toThrow('GOOGLE_REDIRECT_URI')
+    expect(() => build({ ...real, GOOGLE_REDIRECT_URI: 'not a url' })).toThrow(
+      'GOOGLE_REDIRECT_URI'
+    )
+  })
+
+  test('with a tunnel, real Google may redirect to the tunnel or to the portal', () => {
+    const tunnel = 'https://quiet-fox-1.trycloudflare.com'
+    const onTunnel = `${tunnel}/v1/client/google/callback`
+    expect(
+      build({ ...real, CLOSELINE_DEV_PUBLIC_ORIGIN: tunnel, GOOGLE_REDIRECT_URI: onTunnel }).auth
+        .GOOGLE_REDIRECT_URI
+    ).toBe(onTunnel)
+    expect(build({ ...real, CLOSELINE_DEV_PUBLIC_ORIGIN: tunnel }).auth.GOOGLE_REDIRECT_URI).toBe(
+      CALLBACK
+    )
+    // The tunnel origin is only allowed when a tunnel is set.
+    expect(() => build({ ...real, GOOGLE_REDIRECT_URI: onTunnel })).toThrow('GOOGLE_REDIRECT_URI')
+  })
+
+  test('with the fake and a tunnel, the redirect stays on the loopback portal (local browser only)', () => {
+    const env = build({ CLOSELINE_DEV_PUBLIC_ORIGIN: 'https://quiet-fox-1.trycloudflare.com' })
+    expect(env.auth.GOOGLE_REDIRECT_URI).toBe(CALLBACK)
+    expect(env.auth.GOOGLE_ISSUER_URL).toBe('http://127.0.0.1:3010')
+  })
+
+  test('the fake is the first service, runs from the hub and only when asked for', () => {
+    expect(serviceDefinitions('/bin/bun', DEFAULT_PORTS).map((d) => d.name)).toEqual([
+      'core',
+      'auth',
+      'playbook',
+      'portal',
+    ])
+    const [fake, ...rest] = serviceDefinitions('/bin/bun', DEFAULT_PORTS, true)
+    expect(fake?.name).toBe('fake-google')
+    expect(fake?.sibling).toBeUndefined()
+    expect(fake?.cmd).toEqual(['/bin/bun', '--no-env-file', 'scripts/dev-fake-google.ts'])
+    expect(fake?.env).toBe('fakeGoogle')
+    expect(fake?.readyUrl).toBe('http://127.0.0.1:3010/readyz')
+    expect(rest.map((d) => d.name)).toEqual(['core', 'auth', 'playbook', 'portal'])
   })
 })
