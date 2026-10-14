@@ -1,10 +1,26 @@
+import './test-guard.ts'
 import { describe, expect, test } from 'bun:test'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { createContext, createDeps } from './dev.ts'
 import { runDown } from './dev-flow.ts'
-import { DEFAULT_PORTS, STOP_SIGNALS, secretValues } from './dev-lib.ts'
+import {
+  DEFAULT_LOCK_PATH,
+  DEFAULT_PORTS,
+  processStart,
+  STOP_SIGNALS,
+  secretValues,
+} from './dev-lib.ts'
 
 const hub = resolve(import.meta.dir, '..')
 
@@ -101,11 +117,58 @@ function runDev(args: string[], env: Record<string, string>) {
   }
   const proc = Bun.spawnSync([process.execPath, '--no-env-file', 'scripts/dev.ts', ...args], {
     cwd: hub,
-    env,
+    // TMPDIR is passed on so the child's lock is the test run's own, never the real stack's.
+    env: { ...env, TMPDIR: tmpdir() },
     timeout: 30_000,
   })
   return { code: proc.exitCode, out: proc.stdout.toString(), err: proc.stderr.toString() }
 }
+
+describe('tests never reach the real stack lock', () => {
+  const isolated = process.env.CLOSELINE_TEST_TMPDIR
+
+  test('the preload gives every test run its own TMPDIR, so the default lock is not the real one', () => {
+    expect(isolated).toBeTruthy()
+    expect(process.env.TMPDIR).toBe(isolated)
+    expect(DEFAULT_LOCK_PATH).toBe(join(isolated ?? '', 'closeline-dev-stack.lock'))
+  })
+
+  test('a scripts/dev.ts child stops the holder of the test lock and nothing else', async () => {
+    const { bin } = standInDocker()
+    // The holder check reads the process start time with `ps`, which PATH here would not have.
+    symlinkSync(Bun.which('ps') ?? '/bin/ps', join(bin, 'ps'))
+    const lock = join(tmpdir(), 'closeline-dev-stack.lock')
+    const fake = Bun.spawn(
+      [
+        process.execPath,
+        '-e',
+        `import { unlinkSync } from 'node:fs'
+         process.on('SIGTERM', () => { unlinkSync(${JSON.stringify(lock)}); process.exit(0) })
+         console.log('up'); setInterval(() => {}, 1000)`,
+      ],
+      { stdout: 'pipe', stderr: 'ignore' }
+    )
+    try {
+      await fake.stdout.getReader().read()
+      writeFileSync(lock, `${fake.pid} ${processStart(fake.pid)}`)
+
+      // Not runDev: it blocks this process, which must stay free to reap the fake holder.
+      const down = Bun.spawn([process.execPath, '--no-env-file', 'scripts/dev.ts', '--down'], {
+        cwd: hub,
+        env: { PATH: bin, TMPDIR: tmpdir() },
+        stdout: 'ignore',
+        stderr: 'pipe',
+      })
+      const err = await new Response(down.stderr).text()
+
+      expect(await down.exited, err).toBe(0)
+      expect(await Promise.race([fake.exited, Bun.sleep(5000).then(() => 'alive')])).toBe(0)
+    } finally {
+      fake.kill('SIGKILL')
+      rmSync(lock, { force: true })
+    }
+  }, 20_000)
+})
 
 describe('scripts/dev.ts as a program', () => {
   test('--down with DOCKER_HOST=tcp://x exits 1 and runs no docker at all', () => {

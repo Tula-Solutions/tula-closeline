@@ -2,5 +2,6 @@
 # Only install package versions published at least 3 days ago (supply-chain buffer, same as payhub).
 minimumReleaseAge = 259200
 
-# Test/coverage settings live in each package's own bunfig.toml: Bun only reads bunfig from the
-# test cwd, and Turborepo runs each package's tests from inside that package.
+[test]
+# A fresh TMPDIR per run, so no test can touch the real dev stack's lock (see the file).
+preload = ["./scripts/test-preload.ts"]

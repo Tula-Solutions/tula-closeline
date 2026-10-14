@@ -1,5 +1,6 @@
 // The smoke test's own checks, each shown able to fail: a fake breaks one thing and the matching
 // step must go red. See hub issue 38.
+import './test-guard.ts'
 import { describe, expect, test } from 'bun:test'
 import { formatResult, runSmoke, type StepResult } from './dev-smoke.ts'
 import { type FakeOptions, fakeStack } from './dev-smoke-fake.ts'
