@@ -1,6 +1,6 @@
 # ADR 0021 — Live transcription: AssemblyAI Universal-Streaming, one stream per side
 
-**Status:** Proposed (needs the owner: the live trial, concurrency terms and money)
+**Status:** Accepted (the owner chose AssemblyAI, one stream per side, on 2026-10-14; the trial and concurrency terms below are still open)
 **Date:** 2026-10-14
 **Builds on:** ADR 0001, ADR 0003, ADR 0010, ADR 0018, ADR 0020
 
@@ -31,8 +31,9 @@ Prices are list prices read on 2026-10-14.
 - **Runner-up: Deepgram Flux**, at $0.342 to $0.39 per stream-hour, which reports about 260 ms
   end-of-turn detection (vendor claim) and an early end-of-turn event for speculative work.
 
-Switch to Flux if the trial shows AssemblyAI's end of turn at p95 leaves less than 700 ms of the
-1.5 s budget for retrieval, the model and delivery. Switch to Soniox or ElevenLabs if an
+Switch to Flux if the trial measures AssemblyAI's end of turn, after tuning, above 700 ms at p95
+from the Prospect's acoustic end of turn. 700 ms is the end-of-turn line in the phase 2 plan's
+latency budget; the same number is used in both places. Switch to Soniox or ElevenLabs if an
 independent test shows equal accuracy on 8 kHz calls and EU processing is confirmed in writing,
 since Soniox is about $0.10 to $0.12 per stream-hour. Price a self-hosted streaming model when
 sustained concurrency is high enough that the bill passes the cost of a GPU fleet and the people to
@@ -59,7 +60,7 @@ run it; the research could not find a streams-per-GPU figure to set that line.
 - The published pricing shows no volume tier, and the pay-as-you-go plan opens at most 100 new
   streams a minute. Concurrency far above that needs an enterprise agreement before launch; the
   owner must ask for it.
-- The same written terms as ADR 0018 apply before real audio: no training on customer audio, deletion
+- The same written terms as ADR 0018 apply before real audio: no training on Organizations' audio, deletion
   timing and EU processing. Live Calls carry the Prospect's voice from the first second.
 - The live Transcript of a Call is reused when the Call enters the Playbook (ADR 0018's sales history
   path), so a live Call is never sent for batch transcription.

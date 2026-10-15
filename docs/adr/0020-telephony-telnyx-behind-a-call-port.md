@@ -1,6 +1,6 @@
 # ADR 0020 — Telephony: Telnyx behind a call port, with our own media layer as the way out
 
-**Status:** Proposed (needs the owner: vendor account, money, and EU terms)
+**Status:** Accepted (the owner chose Telnyx on 2026-10-14; the EU terms below are still open)
 **Date:** 2026-10-14
 **Builds on:** ADR 0001, ADR 0003, ADR 0006, ADR 0008
 
@@ -30,15 +30,17 @@ Prices are list prices read on 2026-10-14.
   Region storage when the Call ends, after which the vendor copy is deleted. Building the Recording
   ourselves from the stream is the step taken with the move below.
 - **The way out at volume is our own media layer**: a SIP trunk (Telnyx first, about $0.005 a minute)
-  into self-hosted LiveKit with its SIP bridge, on EC2 hosts rather than Fargate (ADR 0008 lists GPUs,
-  not RTP, as its EKS trigger; this is a second reason to leave Fargate for this one component).
-  Estimated $0.42 to $0.54 a Rep-hour.
+  into self-hosted LiveKit with its SIP bridge. Estimated $0.42 to $0.54 a Rep-hour for telephony
+  alone. In ADR 0008's terms this is a departure of launch type, not of orchestrator: the media hosts
+  stay on ECS but on EC2 capacity with host networking, because RTP needs public addresses and UDP
+  ports that Fargate does not give; ADR 0008's EKS triggers (compute spend, GPUs) are not reached by
+  it, and its rule that services stay plain containers with no ECS-specific code still holds.
 - **Runner-up for the managed path: Twilio**, at about 1.7 times the price, if Telnyx cannot meet the
   EU terms below.
 
 Switch to the own media layer when any of these holds: managed telephony spend passes about $25,000
-a month; Telnyx will not commit to the concurrency or calls per second we need; or an enterprise
-customer needs the EU media path under our control.
+a month; Telnyx will not commit to the concurrency or calls per second we need; or a large
+Organization needs the EU media path under our control.
 
 ## Considered options
 
@@ -50,15 +52,15 @@ customer needs the EU media path under our control.
 - **Amazon Chime SDK.** No new subprocessor and AWS regions, but its pricing is spread across pages
   that did not give the streaming rate, and the browser leg needs Chime meetings.
 - **Own media layer from day one.** Cheapest per minute, but it means running RTP, TURN, SIP and
-  recording before there is a single customer.
+  recording before there is a single Organization.
 
 ## Consequences
 
 - **EU residency is not settled.** Telnyx's Data Locality setting keeps stored data (Recordings) in
   the EU, but the docs describe processing in the EU as best-effort, not contractual. Before an EU
   Organization places a Call, the owner must get written terms from Telnyx, or the EU Region uses a
-  second adapter (Twilio's Ireland region is the candidate) behind the same port. This is the open
-  point that keeps the ADR at Proposed.
+  second adapter (Twilio's Ireland region is the candidate) behind the same port. The owner accepted
+  Telnyx with this point open; it must be closed before the first EU Call.
 - Telnyx is a new subprocessor that carries live Call audio and stores Recordings briefly.
 - At about $0.015 a minute, telephony is the largest line in the Copilot's cost (see the research
   report's cost model), so the move to the own media layer is the main cost lever at scale, and the

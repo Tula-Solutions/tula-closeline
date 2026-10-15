@@ -10,13 +10,13 @@ The job: a Rep places or takes a phone Call from a softphone in the portal. Both
 
 | Area | Choice | Cost per Rep-hour (list) | Runner-up |
 | --- | --- | --- | --- |
-| Telephony and softphone | **Telnyx**: WebRTC SDK, Call Control, media stream of both tracks as 16 kHz linear PCM, dual-channel recording | $0.87 to $0.99 | Twilio ($1.49); at volume, our own media layer (self-hosted LiveKit and a SIP trunk, $0.42 to $0.54) |
+| Telephony and softphone | **Telnyx**: WebRTC SDK, Call Control, media stream of both tracks as 16 kHz linear PCM, dual-channel recording | $0.87 to $0.99, telephony only | Twilio ($1.49); at volume, our own media layer (self-hosted LiveKit and a SIP trunk, $0.42 to $0.54, telephony only) |
 | Live transcription | **AssemblyAI Universal-Streaming**, one mono stream per side, no diarization, EU endpoint | $0.30 | Deepgram Flux ($0.68 to $0.78), for its faster end of turn |
 | Suggestion model | **Claude Haiku 5.5 on Amazon Bedrock**, thinking off, cached prefix, US and EU profiles | about $0.004 with gating ($0.01 without) | Claude Sonnet 5.5 only if the evaluation shows a gap worth about 18 times the cost |
 | Transport to the portal | **Server-Sent Events from our own edge tasks** on Fargate behind the load balancer, with a Valkey registry of which edge holds which Call | about $0.0003 | AppSync Events for a pilot below about 10,000 connections |
-| When to speak | **The vendor's end of turn on the Prospect's stream, then our own rule gate**, with retrieval prefetched during the turn | no added vendor | Laya or a fine-tuned small classifier, evaluated once we have labelled Calls (issue 64) |
+| When to speak | **The vendor's end of turn on the Prospect's stream, then our own rule gate**, with retrieval prefetched during the turn | no added vendor; retrieval about $0.01 | Laya as a shadow gate, evaluated once we have labelled Calls (issue 64; section 6a). Jev, its hosted sibling, is not recommended |
 
-**Total, at list prices on the managed path: about $1.25 per Rep-hour**, of which telephony is three quarters and transcription a quarter. The model, retrieval and transport together are about 1%. The cost work that matters is therefore telephony and transcription, not the model. Section 7 works the cost at 1,000, 100,000 and 1,000,000 concurrent Calls.
+**Total, at list prices on the managed path: about $1.27 per Rep-hour** (section 7), of which telephony is about three quarters and transcription about a quarter. The model, retrieval and transport together are about 1%. The cost work that matters is therefore telephony and transcription, not the model. Section 7 works the cost at 1,000, 100,000 and 1,000,000 concurrent Calls.
 
 Two choices are hard to reverse, cost real money and need accounts, so they are drafted as Proposed decision records for the owner: telephony (ADR 0020) and live transcription (ADR 0021).
 
@@ -56,7 +56,7 @@ Notes:
 - **Own media layer.** LiveKit and its SIP bridge on EC2 hosts (RTP and Fargate do not suit each other), with TURN, a worker fleet that forwards audio to the transcriber, and S3 for Recordings. LiveKit Cloud's Scale plan stops at 5,000 concurrent connections; above that it is Enterprise pricing [T5]. At 1,000,000 concurrent Calls, 60 million Call-minutes an hour at $0.007 is about $420,000 an hour (estimate); only carrier contracts with committed minutes reach that, and the media layer has to be ours.
 - **STIR/SHAKEN and caller ID** (general knowledge, not fetched). US carriers sign calls; full attestation needs us verified as the number's owner. Each vendor has a business-profile and branded-calling registration flow. Reps calling from their own numbers need that per number.
 
-**Recommendation: Telnyx for Phase 2, behind a call port, with the own media layer as the planned move once telephony spend passes about $25,000 a month** (about 150 Reps on the phone full time at list price), or when Telnyx will not commit to our concurrency, or when an enterprise customer needs the EU media path under our control.
+**Recommendation: Telnyx for Phase 2, behind a call port, with the own media layer as the planned move once telephony spend passes about $25,000 a month** (about 150 Reps on the phone full time at list price), or when Telnyx will not commit to our concurrency, or when a large Organization needs the EU media path under our control.
 
 ## 3. Live transcription
 
@@ -118,11 +118,9 @@ Cost per Rep-hour (estimate; 3,000 cached prefix tokens, 800 uncached input toke
 
 **Recommendation: Claude Haiku 5.5 on Bedrock with thinking off.** It costs under a cent a Rep-hour. The quality question (is Haiku good enough, or is Sonnet worth 18 times more) is answered by the offline evaluation in the plan, not by guessing. If Haiku's measured first-token time at p95 misses its budget, the fallback is a faster host (Groq, Cerebras), which has no documented EU region.
 
-### Laya (issue 64)
+### Laya and Jev (issue 64)
 
-It exists: `convaiinnovations/laya` on Hugging Face, a non-generative decision model on ModernBERT-large (421 million parameters, 808 MB) with a multilingual variant on mmBERT-base, Apache-2.0, about 33 to 40 ms a decision on a T4 GPU (vendor claim), 47,700 downloads last month [M12]. Its own page says the base checkpoints score near chance without fine-tuning, ship over-confident, and do poorly with many options.
-
-My reading: it is the right kind of model for "should the Copilot speak now" and "is this an objection", but it is not a drop-in. It needs labelled turns from our own Calls, which we do not have until Copilot Calls run, and it needs a GPU or an unmeasured CPU path, while Fargate has no GPU (ADR 0008). Phase 2 starts with a rule gate, collects the labels as a side effect (the Rep's use or dismissal of each Suggestion), and evaluates Laya against a fine-tuned small ModernBERT on CPU and against Haiku 5.5 as a one-token router. Answer to issue 64: evaluate in phase 2, after the Copilot has produced labelled Calls; not on the critical path.
+Both are decision models, not text generators, so neither can write a Suggestion. Where they could fit is section 6a.
 
 ## 5. Transport to the portal
 
@@ -166,26 +164,60 @@ The budget is 1.5 s at p95 from the Prospect's acoustic end of turn to the first
 
 We do not need to answer the Prospect; we need to advise the Rep, who is also about to speak. A Suggestion that lands 1 s after the turn ends is useful; one that lands 3 s later is not. So the vendor's signal is enough to start with, tuned on our trial Calls, and an open turn model on CPU is the fallback if the vendor's end of turn misses its budget.
 
-**The gate** decides, in code and in microseconds, whether a finished Prospect turn earns a model call:
+**The gate** decides, in code and in microseconds, whether a finished Prospect turn earns a model call. It has two parts, because one rule needs retrieval's answer.
+
+Before retrieval (budget 1 ms):
 
 1. Only the Prospect's turns trigger. The Rep's turns update context only.
 2. Skip short or empty turns: fewer than about four words, or only a backchannel ("yeah", "mm-hmm", "right").
 3. Cool down: no new Suggestion for about 20 s after the last one, unless the turn is a question.
-4. Cap: at most about 30 Suggestions per Call-hour.
-5. Skip when retrieval returns the same top Moments as the last Suggestion.
-6. Never suggest while the Rep is already speaking over the Prospect.
+4. Caps: at most about 30 Suggestions per Call-hour, and the per-Rep daily cap of ADR 0022.
+5. Never suggest while the Rep is already speaking over the Prospect.
+
+After retrieval (budget 1 ms):
+
+6. Skip when retrieval returns the same top Moments as the last Suggestion. With no retrieval result (a miss past its deadline), this rule is skipped and the Suggestion is made without evidence.
 
 The thresholds are configuration, tuned on the evaluation set. The expected rate is about 20 model calls a Call-hour, which section 4 prices.
 
 **Retrieval** comes from phase 1. Moment search embeds the last few turns (at most 6 turns and 2,000 characters, `MAX_SEARCH_TURNS` in the contract), searches the Organization's namespace for up to 100 candidates tagged won, and checks each Call's state in Postgres; its real-adapter p95 target is 800 ms. Three changes make it fit a live budget:
 
 - **Embed once, search twice.** One query embedding feeds both the Moment search and the document search, in parallel, from one internal route. Today they are two routes and two embeddings.
-- **Prefetch during the turn.** Retrieval runs on the Prospect's stable partial transcript while they are still talking, at most once a second, and the result is reused at end of turn when it covers most of the turn's words. Retrieval then leaves the critical path in the common case.
+- **Prefetch during the turn.** Retrieval runs on the Prospect's stable partial transcript while they are still talking, each time about 8 new stable words have arrived and at most once a second, and the result is reused at end of turn when it covers at least 60% of the turn's words (a hit). Otherwise retrieval runs fresh at end of turn with a 150 ms deadline (a miss). **Assumed hit rate: 80% of the turns that pass the first gate** (estimate, unmeasured). The misses concentrate on short turns, which the first gate mostly drops, so the real rate may be higher; the load test measures it and the p95 of hits and misses separately.
 - **Warm the namespace when the Call starts.** turbopuffer answers the first query of an idle namespace in about 0.9 s (vendor figure, ADR 0010); a warm query is about 14 ms.
 
-Two limits matter at scale: turbopuffer allows 16 concurrent queries per namespace unless it is pinned [ADR 0010's report], which a large Organization with thousands of Reps on the phone can reach in bursts; and Moment search is open only to Owners and Admins (`SALES_HISTORY_READ_ROLES`), so a Rep's Copilot reaches it through an internal service route (ADR 0013), never with the Rep's token.
+Three limits matter at scale. turbopuffer allows 16 concurrent queries per namespace unless it is pinned [ADR 0010's report], which a large Organization with thousands of Reps on the phone can reach in bursts. Query embeddings run at the prefetch rate, about 600 an hour per Call: at 1,000,000 concurrent Calls that is about 167,000 embeddings a second in a Region, far above any default Bedrock quota (Cohere's own rate limit is 2,000 inputs a minute [ADR 0010's report]), and the query model cannot be swapped for a cheaper local one because query and index vectors must come from the same model (ADR 0010). And Moment search is open only to Owners and Admins (`SALES_HISTORY_READ_ROLES`), so a Rep's Copilot reaches it through an internal service route (ADR 0013), never with the Rep's token.
 
-**Retrieval cost** is small (estimate): about 100 query tokens a search on Cohere Embed v4 and two turbopuffer queries billed at the 1.28 GB minimum, under $0.001 a Rep-hour at a search a minute.
+**Retrieval cost** (estimate) at the prefetch rate: the Prospect speaks about half of a Call-hour at about 150 words a minute, about 4,500 words, so a retrieval every 8 new words is about 600 an hour, which also covers the fresh retrievals on misses. Each is one embedding of about 100 tokens (Cohere Embed v4 on Bedrock; its price was not confirmed from a primary source, so I use the secondary $0.12 per million figure for Embed v5 Pro from ADR 0010's report as a stand-in: about $0.007 an hour) and two turbopuffer queries, each billed at the 1.28 GB minimum at $0.001 per TB queried plus about 10 KB returned at $0.05 a GB (about $0.003 an hour). **About $0.01 a Rep-hour**, more than the model, and still under 1% of the total.
+
+## 6a. Laya and Jev: can they make the Copilot faster or cheaper?
+
+The owner asked: "Is there a way we can use Laya or JEV to speed things up?" Researched on 2026-10-14.
+
+**What they are.**
+
+- **Laya** (`convaiinnovations/laya`, Apache-2.0) is an open, non-generative decision model on ModernBERT-large (421 million parameters; a 322-million-parameter multilingual variant on mmBERT-base). It takes a state plus typed questions (choose one, score, yes or no) and returns answers with probabilities in one pass; it never writes text. By its authors' figures: about 33 to 40 ms a question on a T4 GPU, 193 to 464 ms a request on CPU once loaded, 7 to 10 s to load; an ONNX build for CPU exists. It scores near chance before fine-tuning (0.362 on its typed-decisions benchmark, 0.766 after), ships over-confident (calibration error 0.466, 0.081 after fitting a temperature per question type), and is weak with many options (0.425 on a 77-way task) [J1].
+- **"JEV" is almost certainly Jev, TypeSafe AI's hosted "System One" decision model** (`typesafe/jev-1.13`, released in early access on 2026-09-15). It answers the same kind of typed question through a hosted API, and Laya's `laya-serve` copies Jev's request shape, so Laya is in effect Jev's self-hostable open counterpart. I found no weights or licence for Jev; it is API-only. Its maker claims 70 to 500 ms end to end; Laya's model card gives Jev a p50 of 236 to 276 ms from third-party data; a secondary source reports about $0.042 per million input tokens. Everything about Jev here is secondary [J5][J6][J7][J1].
+- **Other readings ruled out.** No turn-detection, speech or embedding model named JEV was found. The nearest matches are a 2017 paper on joint lexical and prosodic embeddings for turn-taking [J8] and two 2026 turn-detection papers (JAL-Turn, FastTurn) whose names do not match [J9][J10]. JEPA-style "joint embedding" models are unrelated to Laya. If the owner meant something else, the name needs checking with them.
+
+**Where each could act in the Copilot path.**
+
+| Stage | Laya | Jev | Why |
+| --- | --- | --- | --- |
+| End of turn | No | No | Both read text, not audio. The end-of-turn signal comes from the transcriber's own model, and the open fallback is an audio turn model (Smart Turn, section 6), not a text classifier |
+| The gate | **Possible, as a shadow first** | Not recommended | The rule gate costs under 1 ms. Laya would add 35 to 40 ms on a GPU or 200 to 460 ms on CPU, so it cannot make a Suggestion faster. It can only make Suggestions better targeted: fewer wasted model calls, fewer Suggestions the Rep dismisses. Jev adds a network round trip of 70 to 500 ms and sends Prospect text to an early-access vendor, which our data rules (no unredacted text leaves the process) and ADR 0001 (EU text stays in the EU) would both have to clear |
+| Retrieval | No | No | Neither embeds or searches. Deciding to skip retrieval for some turns is the gate again |
+| The Suggestion | No | No | Neither writes text. The model call stays |
+
+**Expected gain, cost and risk of a Laya gate.**
+
+- **Latency: none.** In parallel with retrieval prefetch it adds nothing to the critical path when on a GPU; in series on CPU it costs up to 460 ms, a third of the budget.
+- **Money: at best cents.** A gated Suggestion costs about $0.0002 in model and retrieval (section 4 and 6). Suppressing, say, a third of 20 Suggestions an hour saves about $0.001 a Rep-hour. One always-on GPU host (g6.xlarge, about $0.80 an hour on demand, about $580 a month) costs more than that saving until about 700 Reps are on the phone at once, and it is a GPU service to run on ECS outside Fargate (ADR 0008).
+- **Quality: the real prize, and unproven.** If it halves the Suggestions a Rep dismisses, the Copilot is less noisy; that is worth measuring, not assuming.
+- **Data: a few thousand labelled turns** (my estimate; the card gives no figure). The Rep's use and dismissal of each Suggestion are those labels, so the Copilot produces them as it runs.
+- **Risk:** a young model with author-only figures, over-confident until calibrated on our data, English and multilingual checkpoints only.
+
+**Answer.** Neither makes the Copilot faster: the time goes to end-of-turn detection and the model's first token, and neither model touches those. Laya can be tried later as a shadow gate once real Calls have produced labels, to see whether it cuts dismissed Suggestions; it does not belong on the launch path. Jev is not recommended: it is hosted, slower than our rule gate, early-access, and would send Prospect text to a new subprocessor. Effort for speed goes into the end-of-turn tuning, retrieval prefetch and the model's first token instead.
 
 ## 7. Cost model
 
@@ -193,22 +225,23 @@ Per Rep-hour, meaning one Call-hour with a Rep using the Copilot. List prices ex
 
 | Line | 1,000 concurrent: managed path at list | 100,000 concurrent: own media layer, list rates | 1,000,000 concurrent: own media layer, negotiated rates (assumed) |
 | --- | --- | --- | --- |
-| Telephony | $0.93 (Telnyx) | $0.48 (Telnyx trunk and self-hosted LiveKit) | $0.25 (assumes a carrier rate of $0.003 a minute plus $0.07 of media hosts) |
+| Telephony | $0.93 (Telnyx; the midpoint of $0.87 to $0.99) | $0.48 (Telnyx trunk and self-hosted LiveKit) | $0.25 (assumes a carrier rate of $0.003 a minute plus $0.07 of media hosts) |
 | Live transcription, two streams | $0.30 | $0.30 | $0.15 (assumes half price by agreement or self-hosting; unmeasured) |
 | Suggestion model, gated | $0.0035 | $0.0035 | $0.0035 |
-| Retrieval | $0.001 | $0.001 | $0.001 |
+| Retrieval, at the prefetch rate | $0.01 | $0.01 | $0.01 |
 | Transport to the portal | $0.0006 (fixed costs dominate) | $0.00035 | $0.00033 |
 | Media compute and transfer | $0.02 | $0.01 | $0.01 |
 | Live state (Valkey) and Call records (Postgres) | $0.005 | $0.002 | $0.002 |
-| **Total per Rep-hour** | **about $1.26** | **about $0.80** | **about $0.42** |
-| **Per hour across all Calls** | **about $1,260** | **about $80,000** | **about $420,000** |
+| **Total per Rep-hour** | **about $1.27** | **about $0.81** | **about $0.43** |
+| **Per hour across all Calls** | **about $1,270** | **about $81,000** | **about $430,000** |
 
 How to read it:
 
-- At list prices, a Rep on the phone 6 hours a working day costs about $166 a month on the managed path and about $105 on the own media layer. Pricing the Copilot is the owner's call, but it has to clear that.
+- At list prices, a Rep on the phone 6 hours a working day for 22 working days a month (132 Rep-hours) costs about $168 a month on the managed path and about $107 on the own media layer. Pricing the Copilot is the owner's call, but it has to clear that.
 - The model is not the cost. Choosing Sonnet over Haiku for every Suggestion adds about $0.06 a Rep-hour; a better telephony contract saves ten times that.
+- Telephony alone on the own media layer is $0.42 to $0.54 a Rep-hour (section 2); the totals above include every line.
 - The 1,000,000 column rests on two assumptions nobody has priced: a carrier contract at $0.003 a minute, and transcription at half the list price. Both need quotes before any commitment at that size.
-- Capacity grows by Region deployments (ADR 0001). A million concurrent Calls is not one Region's Postgres: at an average Call of 6 minutes it is about 2,800 Call starts a second, so the plan writes only three Postgres rows a Call and keeps the live Transcript in Valkey.
+- Capacity grows by Region deployments (ADR 0001). A million concurrent Calls is not one Region's Postgres: at an average Call of 6 minutes it is about 2,800 Call starts a second, so the plan keeps voice to six Postgres writes a Call, dedupes webhooks and Rep actions in Valkey, and keeps the live Transcript in Valkey (the plan counts the writes, consumers included).
 
 ## 8. What to do next
 
@@ -274,6 +307,14 @@ Accessed 2026-10-14.
 - [K4] Acoustic, prosodic and semantic signals for turn detection (paper): https://papers.cool/arxiv/2609.11066
 - [K5] Semantic VAD for voice agents (secondary): https://gradium.ai/content/semantic-vad-voice-agents-turn-detection-2026
 
+- [J1] Laya model card: https://huggingface.co/convaiinnovations/laya
+- [J5] System One models and Jev (secondary): https://www.datacamp.com/blog/system-one-models-jev
+- [J6] Jev listing (secondary): https://zenmux.ai/typesafe/jev-1.13
+- [J7] Jev release (secondary): https://infoq.com/news/2026/10/typesafe-ai-jev-released
+- [J8] Liu, Ishi and Ishiguro, Interspeech 2017: https://www.isca-archive.org/interspeech_2017/liu17_interspeech.html
+- [J9] JAL-Turn: arXiv 2603.26515
+- [J10] FastTurn: https://arxiv.org/pdf/2604.01897
+
 ## What I could not verify
 
 - Telnyx: EU processing terms, concurrency limits, and whether the Voice API fee applies to both legs.
@@ -285,3 +326,7 @@ Accessed 2026-10-14.
 - Haiku 5.5 availability per EU Bedrock region, and whether the EU profile routes only within the EU.
 - Connections per Bun SSE task.
 - Retention and training defaults of the streaming vendors.
+- Anything about Jev from TypeSafe's own documentation: its schema, licence, price and data handling are from secondary sources.
+- Laya's accuracy and latency on our turns, and the labelled data it needs.
+- The real-adapter latency of retrieval for the Copilot (one embedding, two searches) from our Regions.
+- The prefetch hit rate.

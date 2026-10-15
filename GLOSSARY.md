@@ -61,7 +61,7 @@ _Avoid_: Coach, assistant, agent
 
 **Suggestion**:
 Advice the Copilot shows a Rep during a live Call, such as what to say next, drawn from the Playbook.
-_Avoid_: Tip, hint, nudge, recommendation, prompt
+_Avoid_: Tip, hint, nudge, recommendation, prompt (as a name for a Suggestion; the language model's input is still its prompt)
 
 **Disclosure**:
 The announcement at the start of a Call that it is recorded and that AI takes part.
