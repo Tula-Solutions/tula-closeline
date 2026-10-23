@@ -33,6 +33,7 @@ services:
       CLOSELINE_CORE_PASSWORD: bootstrap-local-only-replaced-on-every-start
       CLOSELINE_PLAYBOOK_PASSWORD: bootstrap-local-only-replaced-on-every-start
       CLOSELINE_VOICE_PASSWORD: bootstrap-local-only-replaced-on-every-start
+      CLOSELINE_OUTBOUND_PASSWORD: bootstrap-local-only-replaced-on-every-start
     ports: ['127.0.0.1:${CLOSELINE_DEV_POSTGRES_PORT:-5440}:5432']
     volumes:
       - postgres-data:/var/lib/postgresql

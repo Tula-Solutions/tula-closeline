@@ -382,6 +382,23 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       return 1
     }
 
+    deps.say('creating any database role that the volume was made without')
+    if (
+      !(await step(
+        'compose',
+        psql,
+        {
+          cwd: ctx.hub,
+          env: stack.compose,
+          stdin: ensureRolesSql(),
+          timeoutMs: TIMEOUTS.psql,
+        },
+        'could not create the NOLOGIN database roles'
+      ))
+    ) {
+      return failed()
+    }
+
     deps.say('replacing every database login role password with a new random one')
     if (
       !(await step(
@@ -394,23 +411,6 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
           timeoutMs: TIMEOUTS.psql,
         },
         'could not set the role passwords'
-      ))
-    ) {
-      return failed()
-    }
-
-    deps.say('creating any NOLOGIN database role that the volume was made without')
-    if (
-      !(await step(
-        'compose',
-        psql,
-        {
-          cwd: ctx.hub,
-          env: stack.compose,
-          stdin: ensureRolesSql(),
-          timeoutMs: TIMEOUTS.psql,
-        },
-        'could not create the NOLOGIN database roles'
       ))
     ) {
       return failed()

@@ -142,6 +142,7 @@ export const ROLES = [
   'closeline_core',
   'closeline_playbook',
   'closeline_voice',
+  'closeline_outbound',
 ] as const
 
 /** One of the roles in {@link ROLES}. */
@@ -154,6 +155,8 @@ export type Secrets = {
   internalToken: string
   /** The bearer secret the playbook accepts on its internal routes. */
   playbookToken: string
+  /** The key core signs and checks unsubscribe tokens with. */
+  unsubscribeTokenKey: string
 }
 
 /** Fresh secrets from a cryptographically secure generator (32 random bytes each). */
@@ -166,12 +169,18 @@ export function generateSecrets(random: (size: number) => Buffer = randomBytes):
     passwords,
     internalToken: randomHex(32, random),
     playbookToken: randomHex(32, random),
+    unsubscribeTokenKey: randomHex(32, random),
   }
 }
 
 /** Every secret value, for {@link redact}. */
 export function secretValues(secrets: Secrets): string[] {
-  return [...Object.values(secrets.passwords), secrets.internalToken, secrets.playbookToken]
+  return [
+    ...Object.values(secrets.passwords),
+    secrets.internalToken,
+    secrets.playbookToken,
+    secrets.unsubscribeTokenKey,
+  ]
 }
 
 const SCRAM_ITERATIONS = 4096
@@ -238,6 +247,12 @@ export const NOLOGIN_ROLES: readonly { name: string; attributes: string }[] = [
 ]
 
 /**
+ * Login roles the db clone's init.sql does not create (yet), made here without a password: the
+ * rotation gives each one its password on every start. Created only when missing.
+ */
+export const EXTRA_LOGIN_ROLES: readonly string[] = ['closeline_outbound']
+
+/**
  * Idempotent SQL that creates each of {@link NOLOGIN_ROLES} when it is missing and grants it to the
  * owner role (`SET` only, no inheritance). Never touches a login role or a password; run as the
  * superuser before the migrations.
@@ -248,7 +263,11 @@ export function ensureRolesSql(): string {
       `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${name}') THEN ` +
       `CREATE ROLE ${name} NOLOGIN ${attributes}; END IF; END $$;\n` +
       `GRANT ${name} TO closeline_owner WITH SET TRUE, INHERIT FALSE;`
-  ).join('\n')}\n`
+  ).join('\n')}\n${EXTRA_LOGIN_ROLES.map(
+    (name) =>
+      `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${name}') THEN ` +
+      `CREATE ROLE ${name} LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB; END IF; END $$;\n`
+  ).join('')}`
 }
 
 /** The query `dev.ts` runs to list every role that can log in. */
@@ -357,6 +376,9 @@ export function baseChildEnv(parent: Record<string, string | undefined>): Record
 
 /** The queue the playbook reads, defined in `scripts/dev/elasticmq.conf`. */
 export const PLAYBOOK_QUEUE = 'closeline-playbook'
+
+/** The queue core reads its background jobs from, defined in `scripts/dev/elasticmq.conf`. */
+export const CORE_JOBS_QUEUE = 'core-jobs'
 
 /** The bucket the object storage stand-in creates (`compose.dev.yaml`). */
 export const STORAGE_BUCKET = 'closeline-dev'
@@ -573,6 +595,14 @@ export function buildStackEnv(options: {
       INTERNAL_API_TOKENS: secrets.internalToken,
       PORTAL_BASE_URL: where.portal,
       MAIL_LOCAL_URL: where.mail,
+      UNSUBSCRIBE_TOKEN_KEY: secrets.unsubscribeTokenKey,
+      // The queue stand-in of the compose file; it ignores the credentials, but the AWS SDK will
+      // not sign a request without some.
+      AWS_REGION: 'us-east-1',
+      AWS_ACCESS_KEY_ID: 'local',
+      AWS_SECRET_ACCESS_KEY: 'local',
+      JOBS_QUEUE_URL: `http://127.0.0.1:${ports.queue}/000000000000/${CORE_JOBS_QUEUE}`,
+      QUEUE_ENDPOINT: `http://127.0.0.1:${ports.queue}`,
     },
     playbook: {
       ...base,
