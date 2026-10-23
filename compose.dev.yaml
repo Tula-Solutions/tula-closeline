@@ -54,6 +54,9 @@ services:
     ports: ['127.0.0.1:${CLOSELINE_DEV_QUEUE_PORT:-9324}:9324']
     volumes:
       - ./scripts/dev/elasticmq.conf:/opt/elasticmq.conf:ro
+    # Set by `bun run dev` to a hash of that file, so editing it recreates the container.
+    labels:
+      closeline.queue-config: '${CLOSELINE_DEV_QUEUE_CONFIG_SHA:-unset}'
     # The image declares VOLUME /data. Without this compose makes an anonymous volume that
     # `down --volumes` of this project cannot name. The queues are rebuilt on every start anyway.
     tmpfs:

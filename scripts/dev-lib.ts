@@ -536,6 +536,8 @@ export function buildStackEnv(options: {
   dbDir: string
   /** Where the database is reached; only a loopback address is accepted. */
   databaseHost?: string
+  /** The text of `scripts/dev/elasticmq.conf`; its hash makes compose recreate a stale queue. */
+  queueConfig?: string
 }): StackEnv {
   const { parent, ports, secrets, dbDir } = options
   const host = options.databaseHost ?? '127.0.0.1'
@@ -565,6 +567,15 @@ export function buildStackEnv(options: {
       CLOSELINE_DEV_QUEUE_PORT: String(ports.queue),
       CLOSELINE_DEV_STORAGE_PORT: String(ports.storage),
       CLOSELINE_DEV_MAIL_PORT: String(ports.mail),
+      // A bind-mounted file is not part of the service definition, so compose would keep a queue
+      // started from an older config. The hash, a label on the service, makes the change visible.
+      ...(options.queueConfig === undefined
+        ? {}
+        : {
+            CLOSELINE_DEV_QUEUE_CONFIG_SHA: createHash('sha256')
+              .update(options.queueConfig)
+              .digest('hex'),
+          }),
     },
     migrate: { ...base, DATABASE_URL: databaseUrl('closeline_owner', secrets, ports, host) },
     auth: {

@@ -1,5 +1,6 @@
 // Runs the Closeline stack on this machine: `bun run dev`. See docs/local-development.md.
 // This file only parses the arguments and wires the real effects into the flow in dev-flow.ts.
+import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { type FlowContext, type FlowDeps, runDown, runUp } from './dev-flow.ts'
 import {
@@ -57,7 +58,11 @@ export function createDeps(): FlowDeps {
     lock: acquireStartLock,
     stopHolder: () => stopLockHolder(),
     siblingProblems: (root) => checkSiblings(root),
-    buildEnv: buildStackEnv,
+    buildEnv: (options) =>
+      buildStackEnv({
+        ...options,
+        queueConfig: readFileSync(join(hub, 'scripts/dev/elasticmq.conf'), 'utf8'),
+      }),
     secrets: generateSecrets(),
     salt: freshSalt,
     subscribe: (onSignal) => {
