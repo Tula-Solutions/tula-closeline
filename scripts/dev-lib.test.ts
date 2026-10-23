@@ -244,6 +244,16 @@ describe('buildStackEnv', () => {
     expect(env.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:3002')
   })
 
+  test('compose gets a hash of the queue config, so a changed config recreates the queue', () => {
+    const hash = (queueConfig: string) =>
+      buildStackEnv({ parent: {}, ports: DEFAULT_PORTS, secrets, dbDir, queueConfig }).compose
+        .CLOSELINE_DEV_QUEUE_CONFIG_SHA
+    expect(hash('queues { a {} }')).toMatch(/^[0-9a-f]{64}$/)
+    expect(hash('queues { a {} }')).toBe(hash('queues { a {} }'))
+    expect(hash('queues { a {} b {} }')).not.toBe(hash('queues { a {} }'))
+    expect(build().compose.CLOSELINE_DEV_QUEUE_CONFIG_SHA).toBeUndefined()
+  })
+
   test('auth allows the portal origin for browser sessions, on the overridden port too', () => {
     expect(build().auth.SESSION_ALLOWED_ORIGINS).toBe('http://127.0.0.1:3002')
     const moved = buildStackEnv({
