@@ -33,6 +33,8 @@ stack, the smoke test and, for the portal, `agent-browser` to run the change for
   `CLOSELINE_SIBLINGS_DIR` at the folder that holds them) and run `bun install` in each. The git
   dependencies are private; if you have no SSH key on GitHub, do the one-time `gh auth setup-git`
   and `git config --global url...insteadOf` step in any clone's `README.md` ("Getting started").
+- `tula-closeline-voice` exists (phase 2) but is not started by `bun run dev` yet: it is the bare service
+  template until it has routes worth running.
 - The script reads the clones, it never edits them: it does not switch branches, write files or
   run `drizzle-kit push`. Each clone runs whatever branch it has checked out. The script also
   refuses to migrate or change a role unless the database address it built is a loopback address.
