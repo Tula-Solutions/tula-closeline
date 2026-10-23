@@ -206,7 +206,9 @@ never written to a file and never printed (output is also scrubbed of their valu
 - the passwords of the five Postgres login roles above, and
 - the internal secret auth presents to core (`CORE_INTERNAL_TOKEN` in auth, `INTERNAL_API_TOKENS`
   in core), and
-- the playbook's own internal secret (`INTERNAL_API_TOKENS` in the playbook only).
+- the playbook's own internal secret (`INTERNAL_API_TOKENS` in the playbook only), and
+- the internal secret voice presents to core's internal directory (`CORE_INTERNAL_TOKEN` in voice,
+  listed after auth's in core's `INTERNAL_API_TOKENS`); voice's `CORE_INTERNAL_URL` is core's origin.
 
 One value is fixed: auth's `AUTH_MASTER_KEY` is left unset, so auth uses its built-in development
 key, which it refuses outside `ENVIRONMENT=local`. It seals the signing keys stored in the

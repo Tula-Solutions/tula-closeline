@@ -122,8 +122,9 @@ describe('secrets', () => {
     expect(Object.keys(secrets.passwords).sort()).toEqual([...ROLES].sort())
     expect(secrets.internalToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.playbookToken).toMatch(/^[0-9a-f]{64}$/)
+    expect(secrets.voiceCoreToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.unsubscribeTokenKey).toMatch(/^[0-9a-f]{64}$/)
-    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 3)
+    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 4)
   })
 
   test('differ on every run when the real generator is used', () => {
@@ -131,6 +132,7 @@ describe('secrets', () => {
     const b = generateSecrets()
     expect(a.internalToken).not.toBe(b.internalToken)
     expect(a.playbookToken).not.toBe(b.playbookToken)
+    expect(a.voiceCoreToken).not.toBe(b.voiceCoreToken)
     expect(a.unsubscribeTokenKey).not.toBe(b.unsubscribeTokenKey)
     expect(a.passwords.closeline_auth).not.toBe(b.passwords.closeline_auth)
     expect(randomHex(16)).toMatch(/^[0-9a-f]{32}$/)
@@ -221,7 +223,7 @@ describe('buildStackEnv', () => {
     const env = build()
     expect(env.auth.CORE_BASE_URL).toBe('http://127.0.0.1:3100')
     expect(env.auth.CORE_INTERNAL_TOKEN).toBe(secrets.internalToken)
-    expect(env.core.INTERNAL_API_TOKENS).toBe(secrets.internalToken)
+    expect(env.core.INTERNAL_API_TOKENS).toBe(`${secrets.internalToken},${secrets.voiceCoreToken}`)
     expect(env.auth.CORE_INTERNAL_TOKEN?.length).toBeGreaterThanOrEqual(32)
   })
 
@@ -319,6 +321,17 @@ describe('buildStackEnv', () => {
     expect(env.core.JOBS_QUEUE_URL).toBe('http://127.0.0.1:9324/000000000000/core-jobs')
     expect(env.core.QUEUE_ENDPOINT).toBe('http://127.0.0.1:9324')
     expect(JSON.stringify(env.auth)).not.toContain(env.core.UNSUBSCRIBE_TOKEN_KEY ?? 'x')
+  })
+
+  test('voice reaches core internally with its own secret, which core also accepts', () => {
+    const env = build()
+    expect(env.voice.CORE_INTERNAL_URL).toBe('http://127.0.0.1:3100')
+    expect(env.voice.CORE_INTERNAL_TOKEN).toBe(secrets.voiceCoreToken)
+    expect(env.core.INTERNAL_API_TOKENS?.split(',')).toContain(secrets.voiceCoreToken)
+    expect(env.core.INTERNAL_API_TOKENS?.split(',')).toContain(secrets.internalToken)
+    expect(secrets.voiceCoreToken).not.toBe(secrets.internalToken)
+    expect(JSON.stringify(env.auth)).not.toContain(secrets.voiceCoreToken)
+    expect(JSON.stringify(env.portal)).not.toContain(secrets.voiceCoreToken)
   })
 
   test('the playbook uses the compose queue and object storage, with its own internal secret', () => {
