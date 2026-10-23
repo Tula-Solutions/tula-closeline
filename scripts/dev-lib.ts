@@ -20,7 +20,7 @@ import { FAKE_GOOGLE_CLIENT_ID, FAKE_GOOGLE_CLIENT_SECRET } from './dev-fake-goo
 export const COMPOSE_PROJECT = 'closeline-dev'
 
 /** The sibling clones the stack runs from, by short name. */
-export const SIBLINGS = ['db', 'auth', 'core', 'playbook', 'portal'] as const
+export const SIBLINGS = ['db', 'auth', 'core', 'playbook', 'voice', 'portal'] as const
 
 /** The short name of a sibling clone (`tula-closeline-<short>`). */
 export type Sibling = (typeof SIBLINGS)[number]
@@ -34,6 +34,7 @@ export type Ports = {
   auth: number
   core: number
   playbook: number
+  voice: number
   portal: number
   /** The fake Google OpenID provider (loopback only), used when no real Google is configured. */
   fakeGoogle: number
@@ -48,6 +49,7 @@ export const DEFAULT_PORTS: Ports = {
   auth: 3001,
   core: 3100,
   playbook: 3003,
+  voice: 3004,
   portal: 3002,
   fakeGoogle: 3010,
 }
@@ -60,6 +62,7 @@ const PORT_VARIABLES: Record<keyof Ports, string> = {
   auth: 'CLOSELINE_DEV_AUTH_PORT',
   core: 'CLOSELINE_DEV_CORE_PORT',
   playbook: 'CLOSELINE_DEV_PLAYBOOK_PORT',
+  voice: 'CLOSELINE_DEV_VOICE_PORT',
   portal: 'CLOSELINE_DEV_PORTAL_PORT',
   fakeGoogle: 'CLOSELINE_DEV_FAKE_GOOGLE_PORT',
 }
@@ -361,6 +364,7 @@ export function origins(ports: Ports): {
   auth: string
   core: string
   playbook: string
+  voice: string
   portal: string
   mail: string
   fakeGoogle: string
@@ -370,6 +374,7 @@ export function origins(ports: Ports): {
     auth: `http://127.0.0.1:${ports.auth}`,
     core: `http://127.0.0.1:${ports.core}`,
     playbook: `http://127.0.0.1:${ports.playbook}`,
+    voice: `http://127.0.0.1:${ports.voice}`,
     portal: `http://127.0.0.1:${ports.portal}`,
     fakeGoogle: `http://127.0.0.1:${ports.fakeGoogle}`,
   }
@@ -437,6 +442,7 @@ export type StackEnv = {
   auth: Record<string, string>
   core: Record<string, string>
   playbook: Record<string, string>
+  voice: Record<string, string>
   portal: Record<string, string>
   /** The fake Google provider's process; undefined when real Google settings are in use. */
   fakeGoogle: Record<string, string> | undefined
@@ -551,6 +557,17 @@ export function buildStackEnv(options: {
       INGESTION_POLL_INTERVAL_MS: '1000',
       TRANSCRIBE_POLL_INTERVAL_MS: '1000',
     },
+    voice: {
+      ...base,
+      ...common,
+      PORT: String(ports.voice),
+      DATABASE_URL: databaseUrl('closeline_voice', secrets, ports, host),
+      AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
+      AUTH_ISSUER: where.auth,
+      AUTH_AUDIENCE: 'closeline',
+      // The in-process stand-in: no real telephony provider is ever called from a dev stack.
+      TELEPHONY_PROVIDER: 'memory',
+    },
     portal: {
       ...base,
       VITE_ENVIRONMENT: 'local',
@@ -558,6 +575,7 @@ export function buildStackEnv(options: {
       AUTH_PROXY_TARGET: where.auth,
       CORE_PROXY_TARGET: where.core,
       PLAYBOOK_PROXY_TARGET: where.playbook,
+      VOICE_PROXY_TARGET: where.voice,
       // Vite blocks an unknown Host header; the portal reads this setting into `server.allowedHosts`.
       ...(publicOrigin ? { PORTAL_DEV_ALLOWED_HOSTS: publicOrigin.host } : {}),
       // The portal lets the browser follow a redirect to this host only (the fake provider).
@@ -711,12 +729,12 @@ export function checkSiblings(root: string, needed: readonly Sibling[] = SIBLING
 
 /** What the stack runs besides the compose services, in start order. */
 export type ServiceDefinition = {
-  name: 'fake-google' | 'auth' | 'core' | 'playbook' | 'portal'
+  name: 'fake-google' | 'auth' | 'core' | 'playbook' | 'voice' | 'portal'
   /** The clone it runs from; undefined means the hub itself. */
   sibling?: Sibling
   /** The command, run from the clone. `--no-env-file` keeps a stray `.env` out of the process. */
   cmd: string[]
-  env: keyof Pick<StackEnv, 'fakeGoogle' | 'auth' | 'core' | 'playbook' | 'portal'>
+  env: keyof Pick<StackEnv, 'fakeGoogle' | 'auth' | 'core' | 'playbook' | 'voice' | 'portal'>
   /** The URL that answers 2xx when the service is ready. */
   readyUrl: string
 }
@@ -764,6 +782,14 @@ export function serviceDefinitions(
       cmd: [bun, '--no-env-file', 'src/server.ts'],
       env: 'playbook',
       readyUrl: `${where.playbook}/readyz`,
+    },
+    {
+      // Lines and Calls; the number provider is its in-memory stand-in (TELEPHONY_PROVIDER=memory).
+      name: 'voice',
+      sibling: 'voice',
+      cmd: [bun, '--no-env-file', 'src/server.ts'],
+      env: 'voice',
+      readyUrl: `${where.voice}/readyz`,
     },
     {
       name: 'portal',

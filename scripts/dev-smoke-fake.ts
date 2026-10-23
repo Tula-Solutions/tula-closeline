@@ -1,4 +1,5 @@
 import { createPlaybookFake, type PlaybookFakeOptions } from './dev-smoke-playbook-fake.ts'
+import { createVoiceFake, type VoiceFakeOptions } from './dev-smoke-voice-fake.ts'
 
 // A stand-in for auth, core, the playbook, the portal and the Mailpit API, used only by the smoke test's own
 // tests. It behaves like the real services for the calls the smoke test makes (codes in a mailbox,
@@ -92,6 +93,8 @@ export type FakeOptions = {
   trustOrganizationHeader?: boolean
   /** What is broken in the playbook: see dev-smoke-playbook-fake.ts. */
   playbook?: PlaybookFakeOptions
+  /** What is broken in voice: see dev-smoke-voice-fake.ts. */
+  voice?: VoiceFakeOptions
   /**
    * Sign in with Google. `off`: auth-options says Google is off. `real`: the authorization URL is
    * on accounts.google.com. The rest break one thing: a callback that can be replayed, a returning
@@ -694,6 +697,22 @@ export function fakeStack(options: FakeOptions = {}) {
     },
   })
 
+  const voiceHandler = createVoiceFake((token) => sessions.get(token)?.orgId, options.voice)
+  const voiceServer = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      seen.push({
+        method: request.method,
+        path: url.pathname,
+        body: await request.clone().text(),
+        key: request.headers.get('idempotency-key'),
+      })
+      return voiceHandler(request)
+    },
+  })
+
   const serve = (which: 'auth' | 'core' | 'portal' | 'mail') =>
     Bun.serve({
       port: 0,
@@ -778,6 +797,7 @@ export function fakeStack(options: FakeOptions = {}) {
     portal: serve('portal'),
     mail: serve('mail'),
     playbook: playbookServer,
+    voice: voiceServer,
   }
   const origin = (name: keyof typeof servers) => `http://127.0.0.1:${servers[name].port}`
   origins.portal = origin('portal')
@@ -797,6 +817,7 @@ export function fakeStack(options: FakeOptions = {}) {
       auth: origin('auth'),
       core: origin('core'),
       playbook: origin('playbook'),
+      voice: origin('voice'),
       portal: origin('portal'),
       mail: origin('mail'),
     },

@@ -1,11 +1,11 @@
 # Local development
 
 One command runs the Closeline stack on your machine: Postgres 18, two local stand-ins and a local
-mailbox in Docker, then core, auth, the playbook and the portal from their sibling clones. This is plan step 1.19
+mailbox in Docker, then core, auth, the playbook, voice and the portal from their sibling clones. This is plan step 1.19
 (hub issue 20); the mailbox and the end-to-end smoke test are hub issue 38.
 
 ```bash
-bun run dev           # compose up, migrate, start core, auth, the playbook and the portal; Ctrl-C stops the four
+bun run dev           # compose up, migrate, start core, auth, the playbook, voice and the portal; Ctrl-C stops the five
 bun run dev:smoke     # in another terminal: signs up and checks the running stack over HTTP
 bun run dev --down    # stop the running stack (SIGTERM to its bun run dev, SIGKILL after 20 s), then the compose containers (keeps the data)
 bun run dev --down --volumes   # also delete the database and storage data
@@ -29,12 +29,11 @@ stack, the smoke test and, for the portal, `agent-browser` to run the change for
   `unix://` socket: it cannot tell a daemon on this machine from a remote one reached through a
   forwarded socket (for example `ssh -L /tmp/docker.sock:/var/run/docker.sock`), so do not point
   `DOCKER_HOST` or a context at such a socket.
-- Clone `tula-closeline-db`, `-auth`, `-core`, `-playbook` and `-portal` next to this repo (or point
+- Clone `tula-closeline-db`, `-auth`, `-core`, `-playbook`, `-voice` and `-portal` next to this repo (or point
   `CLOSELINE_SIBLINGS_DIR` at the folder that holds them) and run `bun install` in each. The git
   dependencies are private; if you have no SSH key on GitHub, do the one-time `gh auth setup-git`
   and `git config --global url...insteadOf` step in any clone's `README.md` ("Getting started").
-- `tula-closeline-voice` exists (phase 2) but is not started by `bun run dev` yet: it is the bare service
-  template until it has routes worth running.
+- `tula-closeline-voice` is started too, for its Lines routes (see "Voice" below). It never talks to Twilio here.
 - The script reads the clones, it never edits them: it does not switch branches, write files or
   run `drizzle-kit push`. Each clone runs whatever branch it has checked out. The script also
   refuses to migrate or change a role unless the database address it built is a loopback address.
@@ -53,6 +52,7 @@ it should be, has no `node_modules`, or a port is taken.
 | core | `http://127.0.0.1:3100` | `bun src/server.ts` in `tula-closeline-core` |
 | auth | `http://127.0.0.1:3001` | `bun src/server.ts` in `tula-closeline-auth` |
 | playbook | `http://127.0.0.1:3003` | `bun src/server.ts` in `tula-closeline-playbook`: the API, the ingestion job loop (documents, Calls, Recordings, Deal imports) and the sweeps, all in this one process (see "The playbook" below) |
+| voice | `http://127.0.0.1:3004` | `bun src/server.ts` in `tula-closeline-voice` with `TELEPHONY_PROVIDER=memory` (see "Voice" below) |
 | portal | `http://127.0.0.1:3002` | Vite dev server in `tula-closeline-portal` |
 | fake Google | `http://127.0.0.1:3010` | `bun scripts/dev-fake-google.ts` in this repo, started only when no `GOOGLE_*` is set in your shell (see "Sign in with Google" below) |
 
@@ -60,7 +60,7 @@ Ports 5434 to 5437 are the repos' own test databases and 5432 is left for whatev
 the dev Postgres is on 5440. Mailpit's usual port 8025 is often taken by another project's mailbox,
 so this one is on 8026. Override any port with `CLOSELINE_DEV_POSTGRES_PORT`,
 `CLOSELINE_DEV_QUEUE_PORT`, `CLOSELINE_DEV_STORAGE_PORT`, `CLOSELINE_DEV_MAIL_PORT`,
-`CLOSELINE_DEV_AUTH_PORT`, `CLOSELINE_DEV_CORE_PORT`, `CLOSELINE_DEV_PLAYBOOK_PORT`, `CLOSELINE_DEV_PORTAL_PORT` and `CLOSELINE_DEV_FAKE_GOOGLE_PORT` (3010). Every port binds to `127.0.0.1` only.
+`CLOSELINE_DEV_AUTH_PORT`, `CLOSELINE_DEV_CORE_PORT`, `CLOSELINE_DEV_PLAYBOOK_PORT`, `CLOSELINE_DEV_VOICE_PORT` (3004), `CLOSELINE_DEV_PORTAL_PORT` and `CLOSELINE_DEV_FAKE_GOOGLE_PORT` (3010). Every port binds to `127.0.0.1` only.
 Every image is pinned to an exact version and digest in `compose.dev.yaml`.
 
 Why these stand-ins: ADR 0001 gives each Region its own queues, and the plan (steps 1.10, 1.12 and
@@ -93,10 +93,16 @@ API and workers are one process: `WORKERS_ENABLED` defaults to true for `local`,
 and the sweeps start after the server listens. To run an API-only playbook, run it by hand with
 `WORKERS_ENABLED=false`.
 
+**Voice** runs with `ENVIRONMENT=local`, the `closeline_voice` database role (after the migrations) and
+`TELEPHONY_PROVIDER=memory`: numbers for a new Line come from voice's in-memory number provisioner,
+so no real Twilio account, number or charge is involved, and Lines disappear when voice restarts
+(their rows stay in the database). It gets the auth JWKS settings and no queue, storage or vendor
+setting.
+
 **The portal reaches the playbook through its dev server.** The portal calls only its own origin; its
 dev server proxies `/v1/client` to auth, `/v1/organization`, `/v1/members`, `/v1/invitations` and
-`/v1/teams` to core and `/v1/playbook` to the playbook. The script gives it the three targets the
-portal reads (`AUTH_PROXY_TARGET`, `CORE_PROXY_TARGET`, `PLAYBOOK_PROXY_TARGET`, see the portal's
+`/v1/teams` to core, `/v1/playbook` to the playbook and `/v1/lines` to voice. The script gives it the four targets the
+portal reads (`AUTH_PROXY_TARGET`, `CORE_PROXY_TARGET`, `PLAYBOOK_PROXY_TARGET`, `VOICE_PROXY_TARGET`, see the portal's
 `.env.example`) and no other service setting. Nothing in the portal needs to change.
 
 ## Sign in with Google
@@ -170,12 +176,12 @@ reason, when the stack uses real Google or has Google off.
    database once, and a test fails if a `*_PASSWORD` there has no role in the list.
 4. Runs `scripts/migrate.ts` of the `tula-closeline-db` clone as the owner role (the script its
    `db:migrate` runs, started directly with `--no-env-file`).
-5. Starts core, then auth (which calls core), then the playbook, then the portal, waiting for each to answer 2xx (`/readyz`; the playbook's checks its database).
+5. Starts core, then auth (which calls core), then the playbook, then voice, then the portal, waiting for each to answer 2xx (`/readyz`; the playbook's checks its database).
 6. Checks the wiring: core accepts the shared internal secret and refuses a wrong one.
 
-Each child's output is prefixed (`[core]`, `[auth]`, `[playbook]`, `[portal]`) and scrubbed of this run's
+Each child's output is prefixed (`[core]`, `[auth]`, `[playbook]`, `[voice]`, `[portal]`) and scrubbed of this run's
 secrets. If one exits, or any step after the first spawn fails, the others are stopped and the
-script exits 1. On Ctrl-C, SIGTERM or SIGHUP it stops the four services and leaves compose
+script exits 1. On Ctrl-C, SIGTERM or SIGHUP it stops the five services and leaves compose
 running, so the next start is quick. A second signal while a start-up step is still stopping kills
 that step's process (SIGKILL) instead of waiting for it, and says so; a third does nothing. Once
 the services run, signals belong to the supervisor, and a signal during shutdown prints no
@@ -223,7 +229,7 @@ the stack and runs `bun run dev:smoke --strict`, a person runs it.
 
 | Step | What it checks |
 | --- | --- |
-| auth ready, core ready, portal served, playbook ready, the mailbox ready, auth publishes EdDSA signing keys | each answers |
+| auth ready, core ready, portal served, playbook ready, voice ready, the mailbox ready, auth publishes EdDSA signing keys | each answers |
 | core refuses a request with no token and with a malformed one | `401 auth.unauthenticated` and `401 auth.token_invalid` |
 | sign up | `POST /v1/client/sign-ups` with a fresh `smoke-<random>@closeline-smoke.test` address (a reserved domain), a random password and an Organization name |
 | read the verification code | looks the email up in the mailbox (bounded wait) and takes the six-digit code from it. Only a message whose `To` is exactly this run's address counts (Mailpit's `to:` search is a substring match); one message holding two codes, two links or none is an error; a late email is waited for until the deadline; a mailbox that answers 5xx or not as Mailpit does is reported as a mailbox failure, not as a missing email |
@@ -237,6 +243,7 @@ the stack and runs `bun run dev:smoke --strict`, a person runs it.
 | a second sign-up cannot read the first Organization | a second, different user gets a different Organization id. Reads: `GET /v1/organization`, `/v1/members`, `/v1/invitations` and `/v1/teams` with their token return nothing of the first (its Organization id, address, user and membership ids, Invitation and Team ids). The first Organization id sent in an `x-organization-id` header or an `organizationId` query with the second token is ignored or refused. Writes by id with the second token against the first Organization (`DELETE /v1/invitations/{id}`, `PATCH` and `DELETE /v1/teams/{id}`, `POST /v1/teams/{id}/members`, `PATCH /v1/members/{id}`, `POST /v1/invitations` with its `teamId`) each answer `404` with the documented code (`invitation.not_found`, `team.not_found`, `member.not_found`), and the first Organization is unchanged. Positive control: the first user then renames and deletes their own Team and revokes their own Invitation, so a route that answers `404` to everyone fails |
 | **Sales history** (below): confirm the rights wording; upload a Transcript; the first Call created its Deal, open; the Transcript is processed into Moments; upload a Recording; the Recording is transcribed; import a three-row Deal CSV; the import is applied; the Outcome reaches the Moments; a second Organization cannot see any of it; delete the Call and it is gone | the playbook, as the Owner, through its public routes only |
 | **Sign in with Google** (nine steps, `google: ...`): `auth-options` says Google is on; `start` returns an authorization URL on the fake provider; the provider's page is served; approving a fresh email redirects to the portal's callback; the callback through the portal sends a new person to `/sign-up/google?attempt=`; `complete` with an Organization name (sending the attempt cookie and the portal's `Origin`) gives a session and a refresh cookie; `/v1/client/me` shows the person; a second sign-in with the same email goes straight to the app with a refresh cookie; a replayed callback goes to `/sign-in?error=oidc.state_invalid` | auth's Google routes end to end against `scripts/dev-fake-google.ts`, playing the browser. Only a URL on the fake provider's own address is followed. If Google is off, or the stack uses real Google (which needs a person), the steps are skipped with the reason, so `--strict` fails |
+| **Voice Lines** (`voice: ...`): an Owner buys a Line (`POST /v1/lines`, `Idempotency-Key`) and finds it in `GET /v1/lines`; a second Organization lists none of the first's Lines and gets `404 line.not_found` reading one by id | voice, through its public routes only, with the tokens from the earlier steps (skipped if the second Organization was not created) |
 | a replayed refresh token is refused and ends its session | last, on a throwaway sign-in: refresh twice, replay the first token, expect `401 session.reuse_detected`, then expect the newest token to be refused too (the contract says reuse ends the whole session) |
 
 A step whose earlier step failed or was skipped is skipped as `blocked by "<step>" (failed)`, so one

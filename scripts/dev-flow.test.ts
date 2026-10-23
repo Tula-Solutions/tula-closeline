@@ -214,6 +214,7 @@ describe('runUp order', () => {
       'core',
       'auth',
       'playbook',
+      'voice',
       'portal',
     ])
     expect(spawned[0]?.cmd).toEqual([
@@ -263,6 +264,25 @@ describe('runUp order', () => {
     expect(playbook).toBeGreaterThan(migrate)
     expect(h.calls[playbook]?.cmd).toEqual([h.context.execPath, '--no-env-file', 'src/server.ts'])
     expect(h.said.some((line) => line.includes('127.0.0.1:3003'))).toBe(true)
+  })
+
+  test('starts voice after the migration, from the voice clone, with its own environment', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    const migrate = h.calls.findIndex((call) => call.name === 'migrate')
+    const voice = h.calls.findIndex((call) => call.kind === 'spawn' && call.name === 'voice')
+    expect(voice).toBeGreaterThan(migrate)
+    expect(h.calls[voice]?.cwd).toBe('/clones/tula-closeline-voice')
+    expect(h.calls[voice]?.cmd).toEqual([h.context.execPath, '--no-env-file', 'src/server.ts'])
+    expect(h.calls[voice]?.env?.PORT).toBe('3004')
+    expect(h.calls[voice]?.env?.TELEPHONY_PROVIDER).toBe('memory')
+    expect(h.said.some((line) => line.includes('127.0.0.1:3004'))).toBe(true)
+  })
+
+  test('a busy voice port stops the start', async () => {
+    const h = harness({ busy: ['port 3004 (voice) is already in use'] })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.busyAsked.map((wanted) => wanted.name)).toContain('voice')
   })
 
   test('the login-role query asks for rolcanlogin before any rotation SQL is sent', async () => {
@@ -464,6 +484,7 @@ describe('redaction reaches every step', () => {
       'core',
       'auth',
       'playbook',
+      'voice',
       'portal',
     ])
     for (const call of steps) {
@@ -487,7 +508,7 @@ describe('a real Google client secret', () => {
     })
     await runUp(h.context, h.deps)
     const services = h.calls.filter((call) => call.kind === 'spawn')
-    expect(services.length).toBe(4)
+    expect(services.length).toBe(5)
     for (const call of services) {
       expect(call.secrets).toContain(real)
     }
@@ -793,6 +814,7 @@ describe('ports of a stack that is partly up', () => {
       'fake Google',
       'playbook',
       'portal',
+      'voice',
     ])
   })
 

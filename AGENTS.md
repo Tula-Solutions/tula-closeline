@@ -25,7 +25,7 @@ Common standards for all repos, this one included, are in `.claude/COMMON.md`.
 | `bun run verify` | Biome, typecheck, hook tests, and that the hub's own synced copies match `shared/` |
 | `bun run sync` | copy `shared/` into the hub and every sibling `tula-closeline-*` clone |
 | `bun run sync:check` | report drift without copying |
-| `bun run dev` | run the whole stack locally: Postgres, queue and storage stand-ins and a Mailpit mailbox (`127.0.0.1:8026`), then core, auth, the playbook and the portal from the sibling clones, and a fake Google provider (`127.0.0.1:3010`, loopback only) unless real `GOOGLE_*` are set in the shell; `--down` stops compose, `--down --volumes` also deletes its data ([`docs/local-development.md`](docs/local-development.md)) |
+| `bun run dev` | run the whole stack locally: Postgres, queue and storage stand-ins and a Mailpit mailbox (`127.0.0.1:8026`), then core, auth, the playbook, voice and the portal from the sibling clones, and a fake Google provider (`127.0.0.1:3010`, loopback only) unless real `GOOGLE_*` are set in the shell; `--down` stops compose, `--down --volumes` also deletes its data ([`docs/local-development.md`](docs/local-development.md)) |
 | `bun run dev:smoke` | sign up, verify by the mailbox code, sign in and call core over HTTP, including an Organization isolation check, and Sign in with Google against the fake provider; `--strict` fails on a skipped step (CI) |
 | `scripts/new-repo.sh [--publish] <short> <library\|service\|bare> "<description>"` | create a repo |
 
