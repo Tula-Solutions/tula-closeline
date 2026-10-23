@@ -43,6 +43,9 @@ export type SmokeOptions = {
 
 const MAX_BODY_CHARS = 65_536
 
+/** Where core's local default for DEMO_NOTICE_TO sends the Demo Request team notice. */
+const DEMO_NOTICE_TO = 'team@closeline.test'
+
 type Outcome = { status: StepStatus; detail: string }
 type Json = Record<string, unknown>
 
@@ -341,6 +344,57 @@ export async function runSmoke(
             ?.replace(/[^a-z0-9/+.-]/g, '?')
             .slice(0, 40)}`
         )
+  })
+
+  await step(
+    'core: a Demo Request is accepted, replayed, and its team notice is mailed',
+    async () => {
+      // Public route, no token. The team notice goes to the local default of DEMO_NOTICE_TO.
+      remember(DEMO_NOTICE_TO)
+      const company = minted(`Smoke-${crypto.randomUUID().slice(0, 8)}`)
+      const key = minted(`smoke-${crypto.randomUUID()}`)
+      const body = {
+        name: 'Smoke Visitor',
+        workEmail: 'smoke.visitor@example.test',
+        companyName: company,
+        message: 'Sent by dev:smoke.',
+        sourcePage: '/smoke',
+      }
+      const url = `${targets.core}/v1/marketing/demo-requests`
+      const headers = { 'idempotency-key': key }
+      const first = await call('POST', url, { headers, body })
+      if (first.status === 429) {
+        return skip(
+          'the per-address rate limit is spent (10 an hour); wait, or stop the stack with --down --volumes'
+        )
+      }
+      const id = text(pick(first.json, 'id'))
+      if (first.status !== 201 || id === undefined) {
+        return fail(`POST answered ${first.status} ${errorCode(first.json) ?? ''}`.trim())
+      }
+      const replay = await call('POST', url, { headers, body })
+      if (replay.status !== 200 || text(pick(replay.json, 'id')) !== id) {
+        return fail(`the same key and body answered ${replay.status}, not 200 with the first id`)
+      }
+      const mailed = await mailbox(DEMO_NOTICE_TO, `Demo Request from ${company}`)
+      if (!mailed.ok) {
+        return unread(mailed, 'Demo Request team notice')
+      }
+      return mailed.text.includes(id) ? pass() : fail('the team notice does not name the request')
+    }
+  )
+
+  await step('core: a Demo Request with a bad body is marketing.invalid_request', async () => {
+    const response = await call('POST', `${targets.core}/v1/marketing/demo-requests`, {
+      headers: { 'idempotency-key': minted(`smoke-${crypto.randomUUID()}`) },
+      body: { name: minted('Bad Visitor'), workEmail: minted('not-an-email') },
+    })
+    if (response.status === 429) {
+      return skip('the per-address rate limit is spent (10 an hour)')
+    }
+    return response.status === 400 && errorCode(response.json) === 'marketing.invalid_request'
+      ? pass()
+      : fail(`answered ${response.status} ${errorCode(response.json) ?? ''}`.trim())
   })
 
   await step('playbook is ready', async () => {
