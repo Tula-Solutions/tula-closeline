@@ -116,9 +116,16 @@ function operationProblems(
   }
   const security = operation.security
   const takesToken =
-    Array.isArray(security) && security.some((entry) => isObj(entry) && TOKEN_SCHEME in entry)
+    Array.isArray(security) &&
+    security.length > 0 &&
+    security.every(
+      (entry) =>
+        isObj(entry) && Object.keys(entry).length === 1 && Object.keys(entry)[0] === TOKEN_SCHEME
+    )
   if (!takesToken) {
-    problems.push(`${label}: a public route must accept the ${TOKEN_SCHEME} security scheme`)
+    problems.push(
+      `${label}: a public route must accept only the ${TOKEN_SCHEME} security scheme (not internalSecret or any other)`
+    )
   }
   return problems
 }
@@ -191,6 +198,9 @@ export function validateOpenapi(doc: OpenapiDoc): string[] {
 /** The CI check: valid OpenAPI 3.1, and every operation marked public with a scope on a /v1 path. */
 export function checkPublicOpenapi(doc: OpenapiDoc): string[] {
   const problems = validateOpenapi(doc)
+  if (Object.keys(doc.webhooks ?? {}).length > 0) {
+    problems.push('a public document has no webhooks')
+  }
   for (const [path, item] of Object.entries(doc.paths ?? {})) {
     if (!isObj(item)) {
       continue
@@ -238,6 +248,7 @@ export function buildPublicOpenapi(services: Record<string, OpenapiDoc>): Openap
   const paths: Obj = {}
   const components: Obj = {}
   const problems: string[] = []
+  const owners = new Map<string, string>()
   for (const name of Object.keys(services).sort()) {
     const doc = services[name] as OpenapiDoc
     const serviceComponents = isObj(doc.components) ? (doc.components as Obj) : {}
@@ -258,11 +269,13 @@ export function buildPublicOpenapi(services: Record<string, OpenapiDoc>): Openap
         if (found.length > 0 || !isObj(operation) || operation[PUBLIC_MARK] !== true) {
           continue
         }
-        if (isObj(paths[path]) && method in (paths[path] as Obj)) {
+        const first = owners.get(`${method} ${path}`)
+        if (first !== undefined) {
           throw new Error(
-            `${method.toUpperCase()} ${path} is public in two services (${name} and another) twice`
+            `${method.toUpperCase()} ${path} is public in both ${first} and ${name}: listed twice`
           )
         }
+        owners.set(`${method} ${path}`, name)
         kept[method] = operation
         collectRefs(operation, refs)
         for (const entry of (operation.security as Json[]) ?? []) {

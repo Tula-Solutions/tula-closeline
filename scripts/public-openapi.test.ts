@@ -201,6 +201,31 @@ describe('buildPublicOpenapi', () => {
   })
 })
 
+describe('review findings', () => {
+  test('a public route may name only the access token scheme', () => {
+    const core = service({
+      '/v1/x': {
+        get: publicGet('prospects:read', {
+          security: [{ accessToken: [] }, { internalSecret: [] }],
+        }),
+      },
+    })
+    expect(() => buildPublicOpenapi({ core })).toThrow(/internalSecret/)
+  })
+
+  test('the duplicate route error names both services', () => {
+    const core = service({ '/v1/prospects': { get: publicGet() } })
+    const playbook = service({ '/v1/prospects': { get: publicGet() } })
+    expect(() => buildPublicOpenapi({ core, playbook })).toThrow(/core.*playbook/)
+  })
+
+  test('the check fails on a webhook in the document', () => {
+    const doc = buildPublicOpenapi({ core: service({}) })
+    doc.webhooks = { hook: { post: { responses: ok } } }
+    expect(checkPublicOpenapi(doc).join('\n')).toMatch(/webhook/)
+  })
+})
+
 describe('checkPublicOpenapi', () => {
   test('passes a built document', () => {
     const doc = buildPublicOpenapi({ core: service({ '/v1/a': { get: publicGet() } }) })
