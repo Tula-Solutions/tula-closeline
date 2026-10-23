@@ -122,7 +122,8 @@ describe('secrets', () => {
     expect(Object.keys(secrets.passwords).sort()).toEqual([...ROLES].sort())
     expect(secrets.internalToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.playbookToken).toMatch(/^[0-9a-f]{64}$/)
-    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 2)
+    expect(secrets.unsubscribeTokenKey).toMatch(/^[0-9a-f]{64}$/)
+    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 3)
   })
 
   test('differ on every run when the real generator is used', () => {
@@ -130,14 +131,16 @@ describe('secrets', () => {
     const b = generateSecrets()
     expect(a.internalToken).not.toBe(b.internalToken)
     expect(a.playbookToken).not.toBe(b.playbookToken)
+    expect(a.unsubscribeTokenKey).not.toBe(b.unsubscribeTokenKey)
     expect(a.passwords.closeline_auth).not.toBe(b.passwords.closeline_auth)
     expect(randomHex(16)).toMatch(/^[0-9a-f]{32}$/)
   })
 
-  test('there is a login role for every database login: the five closeline_* roles and postgres', () => {
+  test('there is a login role for every database login: the six closeline_* roles and postgres', () => {
     expect([...ROLES].sort()).toEqual([
       'closeline_auth',
       'closeline_core',
+      'closeline_outbound',
       'closeline_owner',
       'closeline_playbook',
       'closeline_voice',
@@ -310,6 +313,14 @@ describe('buildStackEnv', () => {
     )
   })
 
+  test('core gets a generated unsubscribe key and the jobs queue of the compose stand-in', () => {
+    const env = build()
+    expect(env.core.UNSUBSCRIBE_TOKEN_KEY).toMatch(/^[0-9a-f]{64}$/)
+    expect(env.core.JOBS_QUEUE_URL).toBe('http://127.0.0.1:9324/000000000000/core-jobs')
+    expect(env.core.QUEUE_ENDPOINT).toBe('http://127.0.0.1:9324')
+    expect(JSON.stringify(env.auth)).not.toContain(env.core.UNSUBSCRIBE_TOKEN_KEY ?? 'x')
+  })
+
   test('the playbook uses the compose queue and object storage, with its own internal secret', () => {
     const env = build()
     expect(env.playbook.QUEUE_ENDPOINT).toBe('http://127.0.0.1:9324')
@@ -432,7 +443,8 @@ describe('buildStackEnv', () => {
       expect(child.AWS_SECRET_ACCESS_KEY).not.toBe('secret')
     }
     expect(env.playbook.AWS_SECRET_ACCESS_KEY).toBe('local')
-    for (const child of [env.auth, env.core, env.portal, env.migrate]) {
+    expect(env.core.AWS_SECRET_ACCESS_KEY).toBe('local')
+    for (const child of [env.auth, env.portal, env.migrate]) {
       expect(child.AWS_SECRET_ACCESS_KEY).toBeUndefined()
     }
     expect(env.auth.DATABASE_URL).not.toContain('prod')
@@ -565,10 +577,16 @@ describe('ensureRolesSql', () => {
     }
   })
 
+  test('creates the closeline_outbound login role when missing, without a password', () => {
+    expect(ROLES).toContain('closeline_outbound')
+    expect(sql).toMatch(
+      /IF NOT EXISTS[^;]*'closeline_outbound'[^;]*THEN\s+CREATE ROLE closeline_outbound LOGIN/
+    )
+  })
+
   test('never changes a password or a login role', () => {
     expect(sql).not.toContain('ALTER ROLE')
     expect(sql).not.toContain('PASSWORD')
-    expect(sql).not.toContain('rolcanlogin')
   })
 
   test('matches every NOLOGIN role of the db clone init.sql, attributes included', () => {

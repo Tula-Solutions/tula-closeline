@@ -199,8 +199,8 @@ describe('runUp order', () => {
       'ps',
       'up',
       'logins',
-      'rotate',
       'ensure-roles',
+      'rotate',
       'migrate',
       'fake-google',
     ])
@@ -296,6 +296,17 @@ describe('runUp order', () => {
     expect(rotate).toBeGreaterThan(query)
   })
 
+  test('missing roles are created before the rotation, so a new login role can be given a password', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    const ensure = h.calls.findIndex((call) =>
+      call.stdin?.includes('CREATE ROLE closeline_outbound')
+    )
+    const rotate = h.calls.findIndex((call) => call.stdin?.includes('ALTER ROLE'))
+    expect(ensure).toBeGreaterThan(-1)
+    expect(rotate).toBeGreaterThan(ensure)
+  })
+
   test('a failed login-role query returns 1 and no rotation SQL is sent, no migration, no service', async () => {
     const h = harness({ logins: undefined })
     expect(await runUp(h.context, h.deps)).toBe(1)
@@ -313,9 +324,9 @@ describe('runUp order', () => {
   })
 
   test.each([
-    ['compose up', 'up', ['logins', 'rotate', 'ensure-roles', 'migrate']],
-    ['the rotation', 'rotate', ['ensure-roles', 'migrate']],
-    ['the role check', 'ensure-roles', ['migrate']],
+    ['compose up', 'up', ['logins', 'ensure-roles', 'rotate', 'migrate']],
+    ['the role check', 'ensure-roles', ['rotate', 'migrate']],
+    ['the rotation', 'rotate', ['migrate']],
     ['the migration', 'migrate', []],
   ])(
     'a failed %s returns 1, runs none of the later steps and starts no service',

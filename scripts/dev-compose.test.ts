@@ -2,7 +2,14 @@ import './test-guard.ts'
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { COMPOSE_PROJECT, DEFAULT_PORTS, PLAYBOOK_QUEUE, ROLES, STORAGE_BUCKET } from './dev-lib.ts'
+import {
+  COMPOSE_PROJECT,
+  CORE_JOBS_QUEUE,
+  DEFAULT_PORTS,
+  PLAYBOOK_QUEUE,
+  ROLES,
+  STORAGE_BUCKET,
+} from './dev-lib.ts'
 
 const file = join(import.meta.dir, '..', 'compose.dev.yaml')
 const text = readFileSync(file, 'utf8')
@@ -123,6 +130,11 @@ describe('the playbook dev stack', () => {
 
   test('the queue stand-in defines the queue the playbook is given as QUEUE_URL', () => {
     expect(queueConf).toMatch(new RegExp(`^\\s*${PLAYBOOK_QUEUE}\\s*\\{`, 'm'))
+  })
+
+  test('the queue stand-in defines the core jobs queue with its own dead-letter queue', () => {
+    expect(queueConf).toMatch(new RegExp(`^\\s*${CORE_JOBS_QUEUE}\\s*\\{`, 'm'))
+    expect(queueConf).toMatch(new RegExp(`^\\s*${CORE_JOBS_QUEUE}-dlq\\s*\\{`, 'm'))
   })
 
   test('the bucket the playbook is given exists in the object storage stand-in', () => {
