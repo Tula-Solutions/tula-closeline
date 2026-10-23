@@ -110,3 +110,11 @@ _Avoid_: User, lead, traffic
 **Demo Request**:
 A Visitor's submitted wish to see Closeline, held by Closeline itself and not by any Organization.
 _Avoid_: Lead, enquiry, signup
+
+**Prospect Company**:
+The business a Prospect works for, held as a record in an Organization's book.
+_Avoid_: Account, Organization (that is the Closeline customer), company, client
+
+**Source**:
+Where a value on a Prospect or Prospect Company came from, with the time it arrived: manual entry, an import, a CRM or an enrichment provider.
+_Avoid_: Origin, provenance (in user-facing text), channel
