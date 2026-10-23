@@ -155,6 +155,8 @@ export type Secrets = {
   internalToken: string
   /** The bearer secret the playbook accepts on its internal routes. */
   playbookToken: string
+  /** The bearer secret voice presents to core's internal directory; core lists it beside auth's. */
+  voiceCoreToken: string
   /** The key core signs and checks unsubscribe tokens with. */
   unsubscribeTokenKey: string
 }
@@ -169,6 +171,7 @@ export function generateSecrets(random: (size: number) => Buffer = randomBytes):
     passwords,
     internalToken: randomHex(32, random),
     playbookToken: randomHex(32, random),
+    voiceCoreToken: randomHex(32, random),
     unsubscribeTokenKey: randomHex(32, random),
   }
 }
@@ -179,6 +182,7 @@ export function secretValues(secrets: Secrets): string[] {
     ...Object.values(secrets.passwords),
     secrets.internalToken,
     secrets.playbookToken,
+    secrets.voiceCoreToken,
     secrets.unsubscribeTokenKey,
   ]
 }
@@ -596,7 +600,8 @@ export function buildStackEnv(options: {
       AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
       AUTH_ISSUER: where.auth,
       AUTH_AUDIENCE: 'closeline',
-      INTERNAL_API_TOKENS: secrets.internalToken,
+      // Auth's secret and voice's, comma separated (core accepts several).
+      INTERNAL_API_TOKENS: `${secrets.internalToken},${secrets.voiceCoreToken}`,
       PORTAL_BASE_URL: where.portal,
       MAIL_LOCAL_URL: where.mail,
       UNSUBSCRIBE_TOKEN_KEY: secrets.unsubscribeTokenKey,
@@ -638,6 +643,9 @@ export function buildStackEnv(options: {
       AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
       AUTH_ISSUER: where.auth,
       AUTH_AUDIENCE: 'closeline',
+      // The directory voice reads a caller's Membership from.
+      CORE_INTERNAL_URL: where.core,
+      CORE_INTERNAL_TOKEN: secrets.voiceCoreToken,
       // The in-process stand-in: no real telephony provider is ever called from a dev stack.
       TELEPHONY_PROVIDER: 'memory',
     },
