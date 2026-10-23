@@ -117,7 +117,7 @@ _Avoid_: Account, Organization (that is the Closeline customer), company, client
 
 **Source**:
 Where a value on a Prospect or Prospect Company came from, with the time it arrived: manual entry, an import, a CRM or an enrichment provider.
-_Avoid_: Origin, provenance (in user-facing text), channel
+_Avoid_: Origin, provenance (in user-facing text)
 
 **Suppression**:
 An Organization's record that an address must not be contacted, made on a Prospect's request or by a bounce or complaint.
