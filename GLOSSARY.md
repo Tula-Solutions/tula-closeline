@@ -129,7 +129,7 @@ _Avoid_: Permission check, compliance check
 
 **Consent Wording**:
 The exact text a Prospect was shown when agreeing, kept unchanged.
-_Avoid_: Disclaimer, terms
+_Avoid_: Disclaimer, consent terms
 
 **CRM connection**:
 An Organization's authorised link to one external customer-relationship system, from which Closeline reads and to which it can write.
