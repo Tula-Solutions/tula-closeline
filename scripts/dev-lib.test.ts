@@ -319,6 +319,7 @@ describe('buildStackEnv', () => {
     const env = build()
     expect(env.core.UNSUBSCRIBE_TOKEN_KEY).toMatch(/^[0-9a-f]{64}$/)
     expect(env.core.JOBS_QUEUE_URL).toBe('http://127.0.0.1:9324/000000000000/core-jobs')
+    expect(env.core.AUDIT_QUEUE_URL).toBe('http://127.0.0.1:9324/000000000000/core-audit')
     expect(env.core.QUEUE_ENDPOINT).toBe('http://127.0.0.1:9324')
     expect(JSON.stringify(env.auth)).not.toContain(env.core.UNSUBSCRIBE_TOKEN_KEY ?? 'x')
   })

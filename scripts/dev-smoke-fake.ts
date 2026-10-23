@@ -81,6 +81,8 @@ export type FakeOptions = {
   /** Creating an Invitation answers 200, or says its state is something other than pending. */
   createInvitationAs200?: boolean
   invitationNotPending?: boolean
+  /** The queued bulk assignment is accepted (202) but never applied: no worker reads the queue. */
+  assignNeverApplied?: boolean
   /** The error code of a refused replay, and of the newest token after the reuse. */
   replayCode?: string
   newestCode?: string
@@ -119,8 +121,17 @@ export function fakeStack(options: FakeOptions = {}) {
   const users = new Map<string, { password: string; orgId: string; userId: string }>()
   const attempts = new Map<
     string,
-    { email: string; secret: string; code: string; password: string; name: string }
+    {
+      email: string
+      secret: string
+      code: string
+      password: string
+      name: string
+      invitationToken?: string
+    }
   >()
+  const invitationTokens = new Map<string, { orgId: string; role: string }>()
+  const prospects = new Map<string, { orgId: string; ownerMembershipId: string }>()
   const tokens = new Map<string, { sid: string; userId: string; usedAt?: number; child?: string }>()
   const revokedSessions = new Set<string>()
   const sessions = new Map<string, { orgId: string; userId: string }>()
@@ -221,6 +232,9 @@ export function fakeStack(options: FakeOptions = {}) {
         code,
         password: String(body.password),
         name: String(body.organizationName),
+        ...(typeof body.invitationToken === 'string'
+          ? { invitationToken: body.invitationToken }
+          : {}),
       })
       if (!options.dropMail) {
         const line =
@@ -250,10 +264,18 @@ export function fakeStack(options: FakeOptions = {}) {
         return error(422, 'verification.code_invalid')
       }
       const userId = next('usr')
-      const orgId = next('org')
+      const invited = attempt.invitationToken
+        ? invitationTokens.get(attempt.invitationToken)
+        : undefined
+      if (attempt.invitationToken && !invited) {
+        return error(404, 'invitation.not_found')
+      }
+      const orgId = invited?.orgId ?? next('org')
       users.set(attempt.email, { password: attempt.password, orgId, userId })
-      orgs.set(orgId, attempt.name)
-      members.push({ id: next('mem'), userId, orgId, role: 'owner' })
+      if (!invited) {
+        orgs.set(orgId, attempt.name)
+      }
+      members.push({ id: next('mem'), userId, orgId, role: invited?.role ?? 'owner' })
       return json({ id: verify[1], step: { status: 'complete' } })
     }
     if (path === '/v1/client/sign-ins' && request.method === 'POST') {
@@ -526,8 +548,11 @@ export function fakeStack(options: FakeOptions = {}) {
       invitations.push({ id, orgId, email: String(body.email), state: 'pending' })
       if (!options.dropMail) {
         const host = options.wrongLinkHost ? 'https://elsewhere.invalid' : origins.portal
-        const token = () =>
-          `${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().slice(0, 8)}`
+        const token = () => {
+          const value = `${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().slice(0, 8)}`
+          invitationTokens.set(value, { orgId, role: String(body.role) })
+          return value
+        }
         const link = `${host}/sign-up#invitation=${token()}`
         const links =
           options.links === 'two'
@@ -550,6 +575,43 @@ export function fakeStack(options: FakeOptions = {}) {
         },
         options.createInvitationAs200 ? 200 : 201
       )
+    }
+    if (pathname === '/v1/prospects' && method === 'POST') {
+      const owner = members.find((m) => m.orgId === orgId && m.role === 'owner')
+      const id = `prs_${crypto.randomUUID().replaceAll('-', '')}`
+      prospects.set(id, { orgId, ownerMembershipId: owner?.id ?? '' })
+      return json({ id, ownerMembershipId: owner?.id ?? null }, 201)
+    }
+    const prospect = /^\/v1\/prospects\/([^/]+)$/.exec(pathname)
+    if (prospect && method === 'GET') {
+      const found = prospects.get(prospect[1] ?? '')
+      if (!found || found.orgId !== orgId) {
+        return error(404, 'prospect.not_found')
+      }
+      return json({ id: prospect[1], ownerMembershipId: found.ownerMembershipId })
+    }
+    if (pathname === '/v1/prospects/assign' && method === 'POST') {
+      const ids = Array.isArray(body.prospectIds) ? body.prospectIds.map(String) : []
+      const rep = members.find(
+        (m) => m.id === body.ownerMembershipId && m.orgId === orgId && m.role === 'rep'
+      )
+      if (!rep) {
+        return error(403, 'prospect.forbidden_owner')
+      }
+      if (ids.length <= 500) {
+        return json({ state: 'applied', requested: ids.length, assigned: 0, skipped: 0 })
+      }
+      if (!options.assignNeverApplied) {
+        setTimeout(() => {
+          for (const id of ids) {
+            const found = prospects.get(id)
+            if (found && found.orgId === orgId) {
+              found.ownerMembershipId = rep.id
+            }
+          }
+        }, 50)
+      }
+      return json({ state: 'queued', requested: ids.length, assigned: null, skipped: null }, 202)
     }
     if (pathname === '/v1/invitations' && method === 'GET') {
       const rows =
