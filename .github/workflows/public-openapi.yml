@@ -1,0 +1,30 @@
+name: public-openapi
+
+# Fails when public-openapi.json has an operation that is not marked public (x-closeline-public with
+# one x-closeline-scopes entry, ADR 0023), is not valid OpenAPI 3.1 or is not in the canonical form.
+# This is separate from verify.yml, which every repo calls and which is not changed here.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - public-openapi.json
+      - scripts/public-openapi.ts
+      - scripts/public-openapi.test.ts
+      - .github/workflows/public-openapi.yml
+  push:
+    branches: [develop, main]
+    paths:
+      - public-openapi.json
+      - scripts/public-openapi.ts
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun scripts/public-openapi.ts --check public-openapi.json
