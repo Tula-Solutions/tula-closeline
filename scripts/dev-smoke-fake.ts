@@ -436,7 +436,24 @@ export function fakeStack(options: FakeOptions = {}) {
     return undefined
   }
 
+  const demoRequests = new Map<string, { id: string; body: string }>()
   const core = async (request: Request, url: URL, body: Record<string, unknown>) => {
+    if (url.pathname === '/v1/marketing/demo-requests' && request.method === 'POST') {
+      const key = request.headers.get('idempotency-key') ?? ''
+      if (key.length < 16 || typeof body.workEmail !== 'string' || !body.workEmail.includes('@')) {
+        return error(400, 'marketing.invalid_request')
+      }
+      const seen = demoRequests.get(key)
+      if (seen) {
+        return seen.body === JSON.stringify(body)
+          ? json({ id: seen.id }, 200)
+          : error(422, 'request.idempotency_key_reused')
+      }
+      const id = `dreq_${crypto.randomUUID().replaceAll('-', '')}`
+      demoRequests.set(key, { id, body: JSON.stringify(body) })
+      addMail('team@closeline.test', `Demo Request from ${String(body.companyName)}`, id)
+      return json({ id }, 201)
+    }
     const header = request.headers.get('authorization')
     const session = header ? sessions.get(header.replace(/^Bearer /, '')) : undefined
     if (options.coreOpen && url.pathname === '/v1/organization') {
