@@ -118,3 +118,15 @@ _Avoid_: Account, Organization (that is the Closeline customer), company, client
 **Source**:
 Where a value on a Prospect or Prospect Company came from, with the time it arrived: manual entry, an import, a CRM or an enrichment provider.
 _Avoid_: Origin, provenance (in user-facing text), channel
+
+**Suppression**:
+An Organization's record that an address must not be contacted, made on a Prospect's request or by a bounce or complaint.
+_Avoid_: Blocklist, DNC list, opt-out list
+
+**Contact Check**:
+The question every channel asks before contacting a Prospect, answered allowed or denied with a reason.
+_Avoid_: Permission check, compliance check
+
+**Consent Wording**:
+The exact text a Prospect was shown when agreeing, kept unchanged.
+_Avoid_: Disclaimer, terms
