@@ -300,9 +300,9 @@ Vite dev server allows its host. When it is unset nothing changes.
 Sign in with Google through the tunnel needs real Google with the tunnel's redirect URI; the fake
 provider is loopback only (see "Sign in with Google").
 
-The host is allowed through `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, which is Vite-internal and
-undocumented. It was checked against Vite 8.3.4; if Vite drops it, the tunnel fails as "Blocked
-request".
+The host is allowed through the portal's documented `PORTAL_DEV_ALLOWED_HOSTS` setting (see its
+`.env.example`), which needs a portal clone that reads it (portal PR for issue 102); on an older portal
+the tunnel fails as "Blocked request".
 
 Anyone with the link reaches the portal's dev server and, through its proxy, auth, core and the
 playbook, with sign-up open. Use test data only and stop the tunnel when you are done. The mailbox (`127.0.0.1:8026`) is not tunnelled: read the verification code on the machine

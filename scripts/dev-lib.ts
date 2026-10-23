@@ -557,10 +557,8 @@ export function buildStackEnv(options: {
       AUTH_PROXY_TARGET: where.auth,
       CORE_PROXY_TARGET: where.core,
       PLAYBOOK_PROXY_TARGET: where.playbook,
-      // Vite blocks an unknown Host header. This variable is Vite-internal and undocumented,
-      // checked against Vite 8.3.4; if a Vite release drops it the tunnel fails as "Blocked
-      // request". The portal should later read its own env var into `server.allowedHosts`.
-      ...(publicOrigin ? { __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: publicOrigin.host } : {}),
+      // Vite blocks an unknown Host header; the portal reads this setting into `server.allowedHosts`.
+      ...(publicOrigin ? { PORTAL_DEV_ALLOWED_HOSTS: publicOrigin.host } : {}),
       // The portal lets the browser follow a redirect to this host only (the fake provider).
       ...(google.kind === 'fake'
         ? { VITE_GOOGLE_FAKE_ISSUER_HOST: `127.0.0.1:${ports.fakeGoogle}` }
