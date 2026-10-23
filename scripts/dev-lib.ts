@@ -138,6 +138,7 @@ export const ROLES = [
   'closeline_auth',
   'closeline_core',
   'closeline_playbook',
+  'closeline_voice',
 ] as const
 
 /** One of the roles in {@link ROLES}. */

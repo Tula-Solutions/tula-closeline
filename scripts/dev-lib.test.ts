@@ -126,12 +126,13 @@ describe('secrets', () => {
     expect(randomHex(16)).toMatch(/^[0-9a-f]{32}$/)
   })
 
-  test('there is a login role for every database login: the four closeline_* services and postgres', () => {
+  test('there is a login role for every database login: the five closeline_* roles and postgres', () => {
     expect([...ROLES].sort()).toEqual([
       'closeline_auth',
       'closeline_core',
       'closeline_owner',
       'closeline_playbook',
+      'closeline_voice',
       'postgres',
     ])
   })
