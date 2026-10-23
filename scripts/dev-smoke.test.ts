@@ -48,7 +48,7 @@ describe('runSmoke against a healthy stack', () => {
 
   test('each sign-up is sent once and a refresh token is used once, except the deliberate replay', async () => {
     const { stack } = await run()
-    expect(stack.seen.filter((call) => call.path === '/v1/client/sign-ups')).toHaveLength(3)
+    expect(stack.seen.filter((call) => call.path === '/v1/client/sign-ups')).toHaveLength(4)
     const refreshes = stack.seen
       .filter((call) => call.path === '/v1/client/sessions/refresh')
       .map((call) => call.body)
@@ -56,7 +56,7 @@ describe('runSmoke against a healthy stack', () => {
     expect(refreshes.length - new Set(refreshes).size).toBe(1)
     expect(
       stack.seen.filter((call) => call.path === '/v1/invitations' && call.method === 'POST')
-    ).toHaveLength(2)
+    ).toHaveLength(3)
   })
 
   test('the sign-up uses a reserved .test domain and a fresh address each run', async () => {
@@ -152,6 +152,22 @@ describe('refresh through the portal', () => {
   })
 })
 
+describe('core jobs queue step', () => {
+  const JOBS = 'core: a bulk assignment of more than 500 Prospects is queued and completes'
+
+  test('a queued assignment that is never applied fails with a hint about JOBS_QUEUE_URL', async () => {
+    const { results } = await run(
+      { assignNeverApplied: true },
+      { jobsWaitMs: 300, jobsIntervalMs: 50 }
+    )
+    {
+      const step = by(results, JOBS)
+      expect(step?.status).toBe('fail')
+      expect(step?.detail).toContain('JOBS_QUEUE_URL')
+    }
+  })
+})
+
 describe('a failing step blocks only what needs it', () => {
   test('a rejected code fails that step; sign-in and everything after it is skipped as blocked', async () => {
     const { results } = await run({ rejectCode: true })
@@ -241,7 +257,7 @@ describe('Organization isolation', () => {
     const { stack } = await run()
     const signUps = stack.seen.filter((call) => call.path === '/v1/client/sign-ups')
     const emails = signUps.map((call) => (JSON.parse(call.body) as { email: string }).email)
-    expect(new Set(emails).size).toBe(3)
+    expect(new Set(emails).size).toBe(4)
   })
 })
 

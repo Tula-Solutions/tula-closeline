@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   COMPOSE_PROJECT,
+  CORE_AUDIT_QUEUE,
   CORE_JOBS_QUEUE,
   DEFAULT_PORTS,
   PLAYBOOK_QUEUE,
@@ -135,6 +136,11 @@ describe('the playbook dev stack', () => {
   test('the queue stand-in defines the core jobs queue with its own dead-letter queue', () => {
     expect(queueConf).toMatch(new RegExp(`^\\s*${CORE_JOBS_QUEUE}\\s*\\{`, 'm'))
     expect(queueConf).toMatch(new RegExp(`^\\s*${CORE_JOBS_QUEUE}-dlq\\s*\\{`, 'm'))
+  })
+
+  test('the queue stand-in defines the core audit queue with its own dead-letter queue', () => {
+    expect(queueConf).toMatch(new RegExp(`^\\s*${CORE_AUDIT_QUEUE}\\s*\\{`, 'm'))
+    expect(queueConf).toMatch(new RegExp(`^\\s*${CORE_AUDIT_QUEUE}-dlq\\s*\\{`, 'm'))
   })
 
   test('the bucket the playbook is given exists in the object storage stand-in', () => {

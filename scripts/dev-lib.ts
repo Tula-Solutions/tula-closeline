@@ -388,6 +388,9 @@ export const PLAYBOOK_QUEUE = 'closeline-playbook'
 /** The queue core reads its background jobs from, defined in `scripts/dev/elasticmq.conf`. */
 export const CORE_JOBS_QUEUE = 'core-jobs'
 
+/** The queue core publishes `audit.recorded` events to, defined in `scripts/dev/elasticmq.conf`. */
+export const CORE_AUDIT_QUEUE = 'core-audit'
+
 /** The bucket the object storage stand-in creates (`compose.dev.yaml`). */
 export const STORAGE_BUCKET = 'closeline-dev'
 
@@ -611,6 +614,7 @@ export function buildStackEnv(options: {
       AWS_ACCESS_KEY_ID: 'local',
       AWS_SECRET_ACCESS_KEY: 'local',
       JOBS_QUEUE_URL: `http://127.0.0.1:${ports.queue}/000000000000/${CORE_JOBS_QUEUE}`,
+      AUDIT_QUEUE_URL: `http://127.0.0.1:${ports.queue}/000000000000/${CORE_AUDIT_QUEUE}`,
       QUEUE_ENDPOINT: `http://127.0.0.1:${ports.queue}`,
     },
     playbook: {
