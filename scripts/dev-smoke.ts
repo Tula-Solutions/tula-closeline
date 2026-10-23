@@ -20,6 +20,7 @@ export type SmokeTargets = {
   auth: string
   core: string
   playbook: string
+  voice: string
   portal: string
   mail: string
   /** The fake Google provider; without it the Google steps cannot tell the fake from real Google. */
@@ -79,6 +80,12 @@ export const SALES_HISTORY_STEPS = [
   'the Outcome reaches the Moments and the Call is in search',
   'a second Organization cannot see any of the sales history',
   'delete the Call and it is gone',
+] as const
+
+/** The names of the Lines steps (voice), in the order they run after the sales-history steps. */
+export const VOICE_STEPS = [
+  'voice: an Owner adds a Line and lists it',
+  'voice: a second Organization sees none of the first Lines',
 ] as const
 
 /** Bytes of a one-second, 8 kHz, mono, 16-bit PCM WAV of silence: the smallest real Recording. */
@@ -187,6 +194,9 @@ type State = {
   recording?: { id: string }
   dealImport?: { id: string }
   hidden?: true
+  /** The second Organization's sign-in, made by the sales-history check. */
+  second?: { email: string; password: string }
+  line?: { id: string }
 }
 
 /**
@@ -399,6 +409,12 @@ export async function runSmoke(
 
   await step('playbook is ready', async () => {
     const response = await request(`${targets.playbook}/readyz`)
+    await response.body?.cancel()
+    return response.status === 200 ? pass() : fail(`GET /readyz answered ${response.status}`)
+  })
+
+  await step('voice is ready', async () => {
+    const response = await request(`${targets.voice}/readyz`)
     await response.body?.cancel()
     return response.status === 200 ? pass() : fail(`GET /readyz answered ${response.status}`)
   })
@@ -1416,7 +1432,7 @@ export async function runSmoke(
   await flow(
     'a second Organization cannot see any of the sales history',
     ['transcript', 'dealImport', 'recording'],
-    ['hidden'],
+    ['hidden', 'second'],
     async () => {
       const first = state.transcript
       const imported = state.dealImport
@@ -1451,6 +1467,7 @@ export async function runSmoke(
       if ('error' in second) {
         return fail(second.error ?? 'the sales-check sign-in failed')
       }
+      state.second = { email: email2, password: password2 }
       const other = authed(second.session)
       const firstIds = [...salesIds, dealId, dealIdLost, dealIdThird]
       const leaks = (json: unknown) => {
@@ -1643,6 +1660,65 @@ export async function runSmoke(
       return fail('deleting a deleted Call again did not answer 200 deleted')
     }
     return pass('state deleted, out of search and out of the list')
+  })
+
+  // Lines, through voice: the Owner buys one (voice's in-memory number stand-in, never a real
+  // provider) and lists it, then a second Organization must see none of it.
+  const voice = (path: string) => `${targets.voice}${path}`
+  await flow(VOICE_STEPS[0], ['session'], ['line'], async () => {
+    const who = await owner()
+    if ('problem' in who) {
+      return fail(who.problem)
+    }
+    const headers = authed(who.session)
+    const added = await call('POST', voice('/v1/lines'), {
+      headers: { ...headers, 'idempotency-key': `smoke-${runId}-line` },
+      body: { method: 'buy', country: 'US', label: `Smoke ${runId}` },
+      once: true,
+    })
+    const id = text(pick(added.json, 'id'))
+    if (added.status !== 201 || !id || pick(added.json, 'state') !== 'active') {
+      return fail(`POST /v1/lines answered ${statusOf(added)}, not 201 with an active Line`)
+    }
+    remember(id)
+    const listed = await call('GET', voice('/v1/lines'), { headers })
+    const items = pick(listed.json, 'items')
+    if (listed.status !== 200 || !Array.isArray(items)) {
+      return fail(`GET /v1/lines answered ${statusOf(listed)}, not 200 with items`)
+    }
+    if (!items.some((item) => pick(item, 'id') === id)) {
+      return fail('GET /v1/lines does not list the Line the Owner just added')
+    }
+    state.line = { id }
+    return pass('added through the in-memory number stand-in and listed')
+  })
+
+  await flow(VOICE_STEPS[1], ['line', 'second'], [], async () => {
+    const line = state.line
+    const creds = state.second
+    if (!line || !creds) {
+      return fail('missing the first Organization Line')
+    }
+    const signedIn = await signIn(creds.email, creds.password)
+    if ('error' in signedIn) {
+      return fail(signedIn.error ?? 'the sign-in for the Lines check failed')
+    }
+    const headers = authed(signedIn.session)
+    const listed = await call('GET', voice('/v1/lines'), { headers })
+    const items = pick(listed.json, 'items')
+    if (listed.status !== 200 || !Array.isArray(items)) {
+      return fail(`GET /v1/lines answered ${statusOf(listed)} for the second Organization`)
+    }
+    if (items.length > 0 || (JSON.stringify(listed.json) ?? '').includes(line.id)) {
+      return fail('GET /v1/lines returned a Line of the first Organization')
+    }
+    const read = await call('GET', voice(`/v1/lines/${line.id}`), { headers })
+    if (read.status !== 404 || errorCode(read.json) !== 'line.not_found') {
+      return fail(
+        `reading a Line of the first Organization answered ${statusOf(read)}, not 404 line.not_found`
+      )
+    }
+    return pass('an empty list, and the first Organization Line answers 404 line.not_found')
   })
 
   // Sign in with Google, against the stack's fake provider. Independent of the account steps.

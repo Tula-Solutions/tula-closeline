@@ -173,6 +173,7 @@ function stepName(call: Call): string {
     [call.cmd[1] === 'context', 'context'],
     [sql.includes('rolcanlogin'), 'logins'],
     [sql.includes('ALTER ROLE'), 'rotate'],
+    [sql.includes('CREATE ROLE'), 'ensure-roles'],
     [text.includes(' up '), 'up'],
     [text.endsWith(' version'), 'version'],
     [text.includes(' ps '), 'ps'],
@@ -189,7 +190,7 @@ describe('runUp order', () => {
     expect(await runUp(h.context, h.deps)).toBe(0)
     const steps = h.calls.map(stepName)
     // One `ps` per compose service (postgres, queue, storage, mail): see the ports tests below.
-    expect(steps.slice(0, 11)).toEqual([
+    expect(steps.slice(0, 12)).toEqual([
       'context',
       'version',
       'ps',
@@ -199,6 +200,7 @@ describe('runUp order', () => {
       'up',
       'logins',
       'rotate',
+      'ensure-roles',
       'migrate',
       'fake-google',
     ])
@@ -214,6 +216,7 @@ describe('runUp order', () => {
       'core',
       'auth',
       'playbook',
+      'voice',
       'portal',
     ])
     expect(spawned[0]?.cmd).toEqual([
@@ -265,6 +268,25 @@ describe('runUp order', () => {
     expect(h.said.some((line) => line.includes('127.0.0.1:3003'))).toBe(true)
   })
 
+  test('starts voice after the migration, from the voice clone, with its own environment', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    const migrate = h.calls.findIndex((call) => call.name === 'migrate')
+    const voice = h.calls.findIndex((call) => call.kind === 'spawn' && call.name === 'voice')
+    expect(voice).toBeGreaterThan(migrate)
+    expect(h.calls[voice]?.cwd).toBe('/clones/tula-closeline-voice')
+    expect(h.calls[voice]?.cmd).toEqual([h.context.execPath, '--no-env-file', 'src/server.ts'])
+    expect(h.calls[voice]?.env?.PORT).toBe('3004')
+    expect(h.calls[voice]?.env?.TELEPHONY_PROVIDER).toBe('memory')
+    expect(h.said.some((line) => line.includes('127.0.0.1:3004'))).toBe(true)
+  })
+
+  test('a busy voice port stops the start', async () => {
+    const h = harness({ busy: ['port 3004 (voice) is already in use'] })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.busyAsked.map((wanted) => wanted.name)).toContain('voice')
+  })
+
   test('the login-role query asks for rolcanlogin before any rotation SQL is sent', async () => {
     const h = harness()
     await runUp(h.context, h.deps)
@@ -291,8 +313,9 @@ describe('runUp order', () => {
   })
 
   test.each([
-    ['compose up', 'up', ['logins', 'rotate', 'migrate']],
-    ['the rotation', 'rotate', ['migrate']],
+    ['compose up', 'up', ['logins', 'rotate', 'ensure-roles', 'migrate']],
+    ['the rotation', 'rotate', ['ensure-roles', 'migrate']],
+    ['the role check', 'ensure-roles', ['migrate']],
     ['the migration', 'migrate', []],
   ])(
     'a failed %s returns 1, runs none of the later steps and starts no service',
@@ -303,7 +326,8 @@ describe('runUp order', () => {
       // The rotation call carries its SQL on stdin, which runCode cannot see: match it by command.
       const original = h.deps.run
       h.deps.run = (name, cmd, opts) =>
-        failing === 'rotate' && opts.stdin?.includes('ALTER ROLE')
+        (failing === 'rotate' && opts.stdin?.includes('ALTER ROLE')) ||
+        (failing === 'ensure-roles' && opts.stdin?.includes('CREATE ROLE'))
           ? Promise.resolve({ code: 1, timedOut: false })
           : original(name, cmd, opts)
       expect(await runUp(h.context, h.deps)).toBe(1)
@@ -451,7 +475,7 @@ describe('runDown and a running stack', () => {
 })
 
 describe('redaction reaches every step', () => {
-  test('compose up, the rotation, the migration and every service get the whole secret list', async () => {
+  test('compose up, the rotation, the role check, the migration and every service get the whole secret list', async () => {
     const h = harness()
     await runUp(h.context, h.deps)
     const steps = h.calls.filter((call) => call.kind !== 'capture')
@@ -459,11 +483,13 @@ describe('redaction reaches every step', () => {
     expect(names).toEqual([
       'compose',
       'compose',
+      'compose',
       'migrate',
       'fake-google',
       'core',
       'auth',
       'playbook',
+      'voice',
       'portal',
     ])
     for (const call of steps) {
@@ -487,7 +513,7 @@ describe('a real Google client secret', () => {
     })
     await runUp(h.context, h.deps)
     const services = h.calls.filter((call) => call.kind === 'spawn')
-    expect(services.length).toBe(4)
+    expect(services.length).toBe(5)
     for (const call of services) {
       expect(call.secrets).toContain(real)
     }
@@ -793,6 +819,7 @@ describe('ports of a stack that is partly up', () => {
       'fake Google',
       'playbook',
       'portal',
+      'voice',
     ])
   })
 

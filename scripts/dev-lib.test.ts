@@ -18,12 +18,14 @@ import {
   DEFAULT_PORTS,
   dockerEndpointProblem,
   downArgs,
+  ensureRolesSql,
   freshSalt,
   generateSecrets,
   isPortInUse,
   LinePrefixer,
   LOGIN_ROLES_SQL,
   migrateCommand,
+  NOLOGIN_ROLES,
   origins,
   parseArgs,
   probeInternalWiring,
@@ -94,6 +96,12 @@ describe('resolvePorts', () => {
     expect(resolvePorts({}).playbook).toBe(3003)
     expect(resolvePorts({ CLOSELINE_DEV_PLAYBOOK_PORT: '3013' }).playbook).toBe(3013)
     expect(() => resolvePorts({ CLOSELINE_DEV_PLAYBOOK_PORT: '3001' })).toThrow('both 3001')
+  })
+
+  test('the voice port defaults to the one the portal expects and can be moved', () => {
+    expect(resolvePorts({}).voice).toBe(3004)
+    expect(resolvePorts({ CLOSELINE_DEV_VOICE_PORT: '3014' }).voice).toBe(3014)
+    expect(() => resolvePorts({ CLOSELINE_DEV_VOICE_PORT: '3003' })).toThrow('both 3003')
   })
 
   test.each(['0', '65536', 'abc', '30.5', '-1'])('refuses %s, naming the variable', (value) => {
@@ -227,6 +235,7 @@ describe('buildStackEnv', () => {
     expect(env.portal.AUTH_PROXY_TARGET).toBe('http://127.0.0.1:3001')
     expect(env.portal.CORE_PROXY_TARGET).toBe('http://127.0.0.1:3100')
     expect(env.portal.PLAYBOOK_PROXY_TARGET).toBe('http://127.0.0.1:3003')
+    expect(env.portal.VOICE_PROXY_TARGET).toBe('http://127.0.0.1:3004')
     expect(env.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:3002')
   })
 
@@ -319,6 +328,21 @@ describe('buildStackEnv', () => {
     expect(env.playbook.SENTRY_DSN).toBeUndefined()
   })
 
+  test('voice verifies auth tokens like core, logs in as closeline_voice and uses no real telephony', () => {
+    const env = build()
+    expect(env.voice.ENVIRONMENT).toBe('local')
+    expect(env.voice.PORT).toBe('3004')
+    expect(env.voice.REGION).toBe('us')
+    expect(env.voice.AUTH_ISSUER).toBe(env.auth.PUBLIC_URL)
+    expect(env.voice.AUTH_AUDIENCE).toBe(env.auth.TOKEN_AUDIENCE)
+    expect(env.voice.AUTH_JWKS_URL).toBe(`${env.auth.PUBLIC_URL}/.well-known/jwks.json`)
+    expect(env.voice.DATABASE_URL).toBe(
+      `postgres://closeline_voice:${secrets.passwords.closeline_voice}@127.0.0.1:5440/closeline`
+    )
+    expect(env.voice.TELEPHONY_PROVIDER).toBe('memory')
+    expect(Object.keys(env.voice).filter((name) => name.startsWith('TWILIO'))).toEqual([])
+  })
+
   test('every service runs as local and each logs in as its own database role on the dev port', () => {
     const env = build()
     expect(env.auth.ENVIRONMENT).toBe('local')
@@ -341,8 +365,9 @@ describe('buildStackEnv', () => {
       auth: secrets.passwords.closeline_auth,
       core: secrets.passwords.closeline_core,
       playbook: secrets.passwords.closeline_playbook,
+      voice: secrets.passwords.closeline_voice,
     }
-    for (const service of ['auth', 'core', 'playbook'] as const) {
+    for (const service of ['auth', 'core', 'playbook', 'voice'] as const) {
       const text = JSON.stringify(env[service])
       for (const role of ROLES) {
         const password = secrets.passwords[role]
@@ -369,7 +394,7 @@ describe('buildStackEnv', () => {
     expect(env.compose.DOCKER_HOST).toBe('unix:///home/me/.colima/docker.sock')
     expect(env.compose.DOCKER_CONTEXT).toBe('colima')
     expect(env.compose.DOCKER_CONFIG).toBe('/home/me/.docker')
-    for (const child of [env.auth, env.core, env.playbook, env.portal, env.migrate]) {
+    for (const child of [env.auth, env.core, env.playbook, env.voice, env.portal, env.migrate]) {
       expect(Object.keys(child).filter((name) => name.startsWith('DOCKER_'))).toEqual([])
     }
   })
@@ -402,7 +427,7 @@ describe('buildStackEnv', () => {
       AUTH_MASTER_KEY: 'a'.repeat(64),
       AWS_SECRET_ACCESS_KEY: 'secret',
     })
-    for (const child of [env.auth, env.core, env.playbook, env.portal, env.migrate]) {
+    for (const child of [env.auth, env.core, env.playbook, env.voice, env.portal, env.migrate]) {
       expect(child.PATH).toBe('/usr/bin')
       expect(child.AWS_SECRET_ACCESS_KEY).not.toBe('secret')
     }
@@ -526,6 +551,41 @@ describe('compose and migrate command lines', () => {
   })
 })
 
+describe('ensureRolesSql', () => {
+  const sql = ensureRolesSql()
+
+  test('creates each NOLOGIN role only when missing and grants it to the owner', () => {
+    expect(NOLOGIN_ROLES.length).toBeGreaterThan(0)
+    for (const { name } of NOLOGIN_ROLES) {
+      expect(sql).toContain(`rolname = '${name}'`)
+      expect(sql).toMatch(
+        new RegExp(`IF NOT EXISTS[^;]*'${name}'[^;]*THEN\\s+CREATE ROLE ${name} NOLOGIN`)
+      )
+      expect(sql).toContain(`GRANT ${name} TO closeline_owner WITH SET TRUE, INHERIT FALSE;`)
+    }
+  })
+
+  test('never changes a password or a login role', () => {
+    expect(sql).not.toContain('ALTER ROLE')
+    expect(sql).not.toContain('PASSWORD')
+    expect(sql).not.toContain('rolcanlogin')
+  })
+
+  test('matches every NOLOGIN role of the db clone init.sql, attributes included', () => {
+    const root = process.env.CLOSELINE_SIBLINGS_DIR ?? join(import.meta.dir, '..', '..')
+    const file = join(root, 'tula-closeline-db', 'docker', 'postgres', 'init.sql')
+    if (!existsSync(file)) {
+      return
+    }
+    const squash = (text: string) => text.replace(/\s+/g, ' ').trim()
+    const found = [...readFileSync(file, 'utf8').matchAll(/CREATE ROLE (\w+) NOLOGIN([^;]*);/g)]
+    const fromInit = found.map((m) => [m[1] ?? '', squash(m[2] ?? '')])
+    const listed = NOLOGIN_ROLES.map((role) => [role.name, squash(role.attributes)])
+    expect(listed.sort()).toEqual(fromInit.sort())
+    expect(fromInit.length).toBeGreaterThan(0)
+  })
+})
+
 describe('serviceDefinitions', () => {
   const definitions = serviceDefinitions('/bin/bun', DEFAULT_PORTS)
 
@@ -534,6 +594,7 @@ describe('serviceDefinitions', () => {
       'core',
       'auth',
       'playbook',
+      'voice',
       'portal',
     ])
     for (const definition of definitions) {
@@ -547,6 +608,14 @@ describe('serviceDefinitions', () => {
     expect(playbook?.cmd).toEqual(['/bin/bun', '--no-env-file', 'src/server.ts'])
     expect(playbook?.env).toBe('playbook')
     expect(playbook?.readyUrl).toBe('http://127.0.0.1:3003/readyz')
+  })
+
+  test('voice runs from its clone like the playbook, ready when /readyz answers', () => {
+    const voice = definitions.find((definition) => definition.name === 'voice')
+    expect(voice?.sibling).toBe('voice')
+    expect(voice?.cmd).toEqual(['/bin/bun', '--no-env-file', 'src/server.ts'])
+    expect(voice?.env).toBe('voice')
+    expect(voice?.readyUrl).toBe('http://127.0.0.1:3004/readyz')
   })
 
   test('the portal binds the loopback address on its own port and never moves to another', () => {
@@ -621,7 +690,7 @@ describe('checkSiblings', () => {
 
   test('is empty when every clone is there and installed', () => {
     const root = mkdtempSync(join(tmpdir(), 'closeline-dev-'))
-    for (const short of ['db', 'auth', 'core', 'playbook', 'portal']) {
+    for (const short of ['db', 'auth', 'core', 'playbook', 'voice', 'portal']) {
       clone(root, short)
     }
     expect(checkSiblings(root)).toEqual([])
@@ -635,9 +704,10 @@ describe('checkSiblings', () => {
     const problems = checkSiblings(root)
     expect(problems.some((p) => p.includes('tula-closeline-portal is missing'))).toBe(true)
     expect(problems.some((p) => p.includes('tula-closeline-playbook is missing'))).toBe(true)
+    expect(problems.some((p) => p.includes('tula-closeline-voice is missing'))).toBe(true)
     expect(problems.some((p) => p.includes('is not tula-closeline-auth'))).toBe(true)
     expect(problems.some((p) => p.includes('tula-closeline-core has no node_modules'))).toBe(true)
-    expect(problems).toHaveLength(4)
+    expect(problems).toHaveLength(5)
   })
 
   test('asks for vite when the portal has node_modules without it', () => {
@@ -1260,6 +1330,7 @@ describe('Sign in with Google in the dev stack', () => {
       'core',
       'auth',
       'playbook',
+      'voice',
       'portal',
     ])
     const [fake, ...rest] = serviceDefinitions('/bin/bun', DEFAULT_PORTS, true)
@@ -1268,6 +1339,6 @@ describe('Sign in with Google in the dev stack', () => {
     expect(fake?.cmd).toEqual(['/bin/bun', '--no-env-file', 'scripts/dev-fake-google.ts'])
     expect(fake?.env).toBe('fakeGoogle')
     expect(fake?.readyUrl).toBe('http://127.0.0.1:3010/readyz')
-    expect(rest.map((d) => d.name)).toEqual(['core', 'auth', 'playbook', 'portal'])
+    expect(rest.map((d) => d.name)).toEqual(['core', 'auth', 'playbook', 'voice', 'portal'])
   })
 })
