@@ -110,3 +110,15 @@ _Avoid_: User, lead, traffic
 **Demo Request**:
 A Visitor's submitted wish to see Closeline, held by Closeline itself and not by any Organization.
 _Avoid_: Lead, enquiry, signup
+
+**Suppression**:
+An Organization's record that an address must not be contacted, made on a Prospect's request or by a bounce or complaint.
+_Avoid_: Blocklist, DNC list, opt-out list
+
+**Contact Check**:
+The question every channel asks before contacting a Prospect, answered allowed or denied with a reason.
+_Avoid_: Permission check, compliance check
+
+**Consent Wording**:
+The exact text a Prospect was shown when agreeing, kept unchanged.
+_Avoid_: Disclaimer, terms
