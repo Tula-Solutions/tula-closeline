@@ -244,7 +244,7 @@ describe('buildStackEnv', () => {
   test('without CLOSELINE_DEV_PUBLIC_ORIGIN nothing about the public origin is set', () => {
     const env = build({ CLOSELINE_DEV_PUBLIC_ORIGIN: '' })
     expect(env.auth.SESSION_ALLOWED_ORIGINS).toBe('http://127.0.0.1:3002')
-    expect(env.portal.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS).toBeUndefined()
+    expect(env.portal.PORTAL_DEV_ALLOWED_HOSTS).toBeUndefined()
   })
 
   test('a public origin is allowed for sessions and its host for the portal dev server', () => {
@@ -252,7 +252,7 @@ describe('buildStackEnv', () => {
     expect(env.auth.SESSION_ALLOWED_ORIGINS).toBe(
       'http://127.0.0.1:3002,https://quiet-fox-1.trycloudflare.com'
     )
-    expect(env.portal.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS).toBe('quiet-fox-1.trycloudflare.com')
+    expect(env.portal.PORTAL_DEV_ALLOWED_HOSTS).toBe('quiet-fox-1.trycloudflare.com')
     expect(env.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:3002')
   })
 
@@ -261,7 +261,7 @@ describe('buildStackEnv', () => {
     expect(env.auth.SESSION_ALLOWED_ORIGINS).toBe(
       'http://127.0.0.1:3002,https://dev.example.com:8443'
     )
-    expect(env.portal.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS).toBe('dev.example.com')
+    expect(env.portal.PORTAL_DEV_ALLOWED_HOSTS).toBe('dev.example.com')
   })
 
   test.each([
