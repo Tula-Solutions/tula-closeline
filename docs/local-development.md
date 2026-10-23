@@ -164,7 +164,7 @@ reason, when the stack uses real Google or has Google off.
    mailbox that does not answer stops the start (exit 1) before any role is touched.
 3. Asks the database which roles can log in (`rolcanlogin`) and stops if any is not in the
    rotation list (`ROLES` in `scripts/dev-lib.ts`), then gives each of the five login roles
-   (`postgres`, `closeline_owner`, `closeline_auth`, `closeline_core`, `closeline_playbook`) a new
+   (`postgres`, `closeline_owner`, `closeline_auth`, `closeline_core`, `closeline_playbook`, `closeline_voice`) a new
    random password. The password is sent as a SCRAM-SHA-256 verifier, never as clear text, so a
    failed statement cannot put it in the Postgres log. The compose file's values only create the
    database once, and a test fails if a `*_PASSWORD` there has no role in the list.
