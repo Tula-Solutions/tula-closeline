@@ -8,6 +8,7 @@ import {
   composeArgs,
   dockerEndpointProblem,
   downArgs,
+  ensureRolesSql,
   type HolderOutcome,
   LOGIN_ROLES_SQL,
   type ManagedChild,
@@ -393,6 +394,23 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
           timeoutMs: TIMEOUTS.psql,
         },
         'could not set the role passwords'
+      ))
+    ) {
+      return failed()
+    }
+
+    deps.say('creating any NOLOGIN database role that the volume was made without')
+    if (
+      !(await step(
+        'compose',
+        psql,
+        {
+          cwd: ctx.hub,
+          env: stack.compose,
+          stdin: ensureRolesSql(),
+          timeoutMs: TIMEOUTS.psql,
+        },
+        'could not create the NOLOGIN database roles'
       ))
     ) {
       return failed()

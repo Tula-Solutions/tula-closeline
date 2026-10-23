@@ -1432,7 +1432,7 @@ export async function runSmoke(
   await flow(
     'a second Organization cannot see any of the sales history',
     ['transcript', 'dealImport', 'recording'],
-    ['hidden'],
+    ['hidden', 'second'],
     async () => {
       const first = state.transcript
       const imported = state.dealImport

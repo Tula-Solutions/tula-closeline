@@ -61,3 +61,18 @@ describe('the Lines steps against a broken voice', () => {
     expect(by(results, VOICE_STEPS[0])?.status).toBe('fail')
   })
 })
+
+describe('the Lines isolation step when the second Organization was never made', () => {
+  test('is skipped, and the skip names the sales-history step that should have made it', async () => {
+    const stack = fakeStack({ playbook: { noRightsGate: true } })
+    try {
+      const results = await runSmoke(stack.targets, fast)
+      const skipped = by(results, VOICE_STEPS[1])
+      expect(skipped?.status).toBe('skip')
+      expect(skipped?.detail).toContain('a second Organization cannot see any of the sales history')
+      expect(skipped?.detail).not.toContain('an earlier step that did not provide it')
+    } finally {
+      stack.stop()
+    }
+  })
+})

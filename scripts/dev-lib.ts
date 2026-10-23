@@ -212,6 +212,41 @@ export function freshSalt(): Buffer {
   return randomBytes(16)
 }
 
+/**
+ * The NOLOGIN roles of `tula-closeline-db/docker/postgres/init.sql`, with the attributes it gives
+ * them. That file runs only when the dev volume is first created, so a volume made before a
+ * migration needed a new role would fail to migrate: {@link ensureRolesSql} creates the missing
+ * ones on every start. A test compares this list with the db clone's init.sql.
+ */
+export const NOLOGIN_ROLES: readonly { name: string; attributes: string }[] = [
+  {
+    name: 'closeline_core_search',
+    attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
+  },
+  {
+    name: 'closeline_core_crm_lookup',
+    attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
+  },
+  {
+    name: 'closeline_core_key_lookup',
+    attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
+  },
+]
+
+/**
+ * Idempotent SQL that creates each of {@link NOLOGIN_ROLES} when it is missing and grants it to the
+ * owner role (`SET` only, no inheritance). Never touches a login role or a password; run as the
+ * superuser before the migrations.
+ */
+export function ensureRolesSql(): string {
+  return `${NOLOGIN_ROLES.map(
+    ({ name, attributes }) =>
+      `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${name}') THEN ` +
+      `CREATE ROLE ${name} NOLOGIN ${attributes}; END IF; END $$;\n` +
+      `GRANT ${name} TO closeline_owner WITH SET TRUE, INHERIT FALSE;`
+  ).join('\n')}\n`
+}
+
 /** The query `dev.ts` runs to list every role that can log in. */
 export const LOGIN_ROLES_SQL = 'select rolname from pg_roles where rolcanlogin order by 1'
 

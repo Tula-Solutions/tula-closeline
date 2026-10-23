@@ -174,7 +174,11 @@ reason, when the stack uses real Google or has Google off.
    `closeline_voice`) a new random password. The password is sent as a SCRAM-SHA-256 verifier, never as clear text, so a
    failed statement cannot put it in the Postgres log. The compose file's values only create the
    database once, and a test fails if a `*_PASSWORD` there has no role in the list.
-4. Runs `scripts/migrate.ts` of the `tula-closeline-db` clone as the owner role (the script its
+4. Creates any NOLOGIN role of the db clone's `docker/postgres/init.sql` (`NOLOGIN_ROLES` in
+   `scripts/dev-lib.ts`) that a volume made before a migration needed it lacks, and grants it to the owner role.
+   `init.sql` runs only on a fresh volume; this keeps an older one migrating without a reset. A test
+   fails if `init.sql` has a NOLOGIN role the list does not.
+   Then runs `scripts/migrate.ts` of the `tula-closeline-db` clone as the owner role (the script its
    `db:migrate` runs, started directly with `--no-env-file`).
 5. Starts core, then auth (which calls core), then the playbook, then voice, then the portal, waiting for each to answer 2xx (`/readyz`; the playbook's checks its database).
 6. Checks the wiring: core accepts the shared internal secret and refuses a wrong one.

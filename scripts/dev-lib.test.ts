@@ -18,12 +18,14 @@ import {
   DEFAULT_PORTS,
   dockerEndpointProblem,
   downArgs,
+  ensureRolesSql,
   freshSalt,
   generateSecrets,
   isPortInUse,
   LinePrefixer,
   LOGIN_ROLES_SQL,
   migrateCommand,
+  NOLOGIN_ROLES,
   origins,
   parseArgs,
   probeInternalWiring,
@@ -546,6 +548,41 @@ describe('compose and migrate command lines', () => {
     const command = migrateCommand('/bin/bun')
     expect(command).toEqual(['/bin/bun', '--no-env-file', 'scripts/migrate.ts'])
     expect(command).not.toContain('run')
+  })
+})
+
+describe('ensureRolesSql', () => {
+  const sql = ensureRolesSql()
+
+  test('creates each NOLOGIN role only when missing and grants it to the owner', () => {
+    expect(NOLOGIN_ROLES.length).toBeGreaterThan(0)
+    for (const { name } of NOLOGIN_ROLES) {
+      expect(sql).toContain(`rolname = '${name}'`)
+      expect(sql).toMatch(
+        new RegExp(`IF NOT EXISTS[^;]*'${name}'[^;]*THEN\\s+CREATE ROLE ${name} NOLOGIN`)
+      )
+      expect(sql).toContain(`GRANT ${name} TO closeline_owner WITH SET TRUE, INHERIT FALSE;`)
+    }
+  })
+
+  test('never changes a password or a login role', () => {
+    expect(sql).not.toContain('ALTER ROLE')
+    expect(sql).not.toContain('PASSWORD')
+    expect(sql).not.toContain('rolcanlogin')
+  })
+
+  test('matches every NOLOGIN role of the db clone init.sql, attributes included', () => {
+    const root = process.env.CLOSELINE_SIBLINGS_DIR ?? join(import.meta.dir, '..', '..')
+    const file = join(root, 'tula-closeline-db', 'docker', 'postgres', 'init.sql')
+    if (!existsSync(file)) {
+      return
+    }
+    const squash = (text: string) => text.replace(/\s+/g, ' ').trim()
+    const found = [...readFileSync(file, 'utf8').matchAll(/CREATE ROLE (\w+) NOLOGIN([^;]*);/g)]
+    const fromInit = found.map((m) => [m[1] ?? '', squash(m[2] ?? '')])
+    const listed = NOLOGIN_ROLES.map((role) => [role.name, squash(role.attributes)])
+    expect(listed.sort()).toEqual(fromInit.sort())
+    expect(fromInit.length).toBeGreaterThan(0)
   })
 })
 

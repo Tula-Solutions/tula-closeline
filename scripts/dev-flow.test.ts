@@ -173,6 +173,7 @@ function stepName(call: Call): string {
     [call.cmd[1] === 'context', 'context'],
     [sql.includes('rolcanlogin'), 'logins'],
     [sql.includes('ALTER ROLE'), 'rotate'],
+    [sql.includes('CREATE ROLE'), 'ensure-roles'],
     [text.includes(' up '), 'up'],
     [text.endsWith(' version'), 'version'],
     [text.includes(' ps '), 'ps'],
@@ -189,7 +190,7 @@ describe('runUp order', () => {
     expect(await runUp(h.context, h.deps)).toBe(0)
     const steps = h.calls.map(stepName)
     // One `ps` per compose service (postgres, queue, storage, mail): see the ports tests below.
-    expect(steps.slice(0, 11)).toEqual([
+    expect(steps.slice(0, 12)).toEqual([
       'context',
       'version',
       'ps',
@@ -199,6 +200,7 @@ describe('runUp order', () => {
       'up',
       'logins',
       'rotate',
+      'ensure-roles',
       'migrate',
       'fake-google',
     ])
@@ -311,8 +313,9 @@ describe('runUp order', () => {
   })
 
   test.each([
-    ['compose up', 'up', ['logins', 'rotate', 'migrate']],
-    ['the rotation', 'rotate', ['migrate']],
+    ['compose up', 'up', ['logins', 'rotate', 'ensure-roles', 'migrate']],
+    ['the rotation', 'rotate', ['ensure-roles', 'migrate']],
+    ['the role check', 'ensure-roles', ['migrate']],
     ['the migration', 'migrate', []],
   ])(
     'a failed %s returns 1, runs none of the later steps and starts no service',
@@ -323,7 +326,8 @@ describe('runUp order', () => {
       // The rotation call carries its SQL on stdin, which runCode cannot see: match it by command.
       const original = h.deps.run
       h.deps.run = (name, cmd, opts) =>
-        failing === 'rotate' && opts.stdin?.includes('ALTER ROLE')
+        (failing === 'rotate' && opts.stdin?.includes('ALTER ROLE')) ||
+        (failing === 'ensure-roles' && opts.stdin?.includes('CREATE ROLE'))
           ? Promise.resolve({ code: 1, timedOut: false })
           : original(name, cmd, opts)
       expect(await runUp(h.context, h.deps)).toBe(1)
@@ -471,12 +475,13 @@ describe('runDown and a running stack', () => {
 })
 
 describe('redaction reaches every step', () => {
-  test('compose up, the rotation, the migration and every service get the whole secret list', async () => {
+  test('compose up, the rotation, the role check, the migration and every service get the whole secret list', async () => {
     const h = harness()
     await runUp(h.context, h.deps)
     const steps = h.calls.filter((call) => call.kind !== 'capture')
     const names = steps.map((call) => call.name)
     expect(names).toEqual([
+      'compose',
       'compose',
       'compose',
       'migrate',
