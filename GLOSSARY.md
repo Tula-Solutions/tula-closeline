@@ -111,6 +111,14 @@ _Avoid_: User, lead, traffic
 A Visitor's submitted wish to see Closeline, held by Closeline itself and not by any Organization.
 _Avoid_: Lead, enquiry, signup
 
+**Prospect Company**:
+The business a Prospect works for, held as a record in an Organization's book.
+_Avoid_: Account, Organization (that is the Closeline customer), company, client
+
+**Source**:
+Where a value on a Prospect or Prospect Company came from, with the time it arrived: manual entry, an import, a CRM or an enrichment provider.
+_Avoid_: Origin, provenance (in user-facing text), channel
+
 **Suppression**:
 An Organization's record that an address must not be contacted, made on a Prospect's request or by a bounce or complaint.
 _Avoid_: Blocklist, DNC list, opt-out list
