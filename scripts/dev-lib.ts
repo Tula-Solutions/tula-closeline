@@ -231,6 +231,10 @@ export const NOLOGIN_ROLES: readonly { name: string; attributes: string }[] = [
     name: 'closeline_core_key_lookup',
     attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
   },
+  {
+    name: 'closeline_core_outbox_drain',
+    attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
+  },
 ]
 
 /**
