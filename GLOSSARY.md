@@ -102,3 +102,11 @@ _Avoid_: Snippet, segment, clip
 **Linked Google account**:
 A person's Google account tied to their Closeline sign-in, so they can sign in with Google as well as, or instead of, a password.
 _Avoid_: Google login, social login, SSO
+
+**Visitor**:
+A person browsing Closeline's public site who has not signed in.
+_Avoid_: User, lead, traffic
+
+**Demo Request**:
+A Visitor's submitted wish to see Closeline, held by Closeline itself and not by any Organization.
+_Avoid_: Lead, enquiry, signup
