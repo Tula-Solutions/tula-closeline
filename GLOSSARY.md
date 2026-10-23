@@ -59,6 +59,14 @@ _Avoid_: Email agent, SDR, sequencer
 The live assistant that advises a Rep during a conversation with a Prospect.
 _Avoid_: Coach, assistant, agent
 
+**Suggestion**:
+Advice the Copilot shows a Rep during a live Call, such as what to say next, drawn from the Playbook.
+_Avoid_: Tip, hint, nudge, recommendation, prompt (as a name for a Suggestion; the language model's input is still its prompt)
+
+**Disclosure**:
+The announcement at the start of a Call that it is recorded and that AI takes part.
+_Avoid_: Notice, disclaimer, consent message, beep
+
 **Playbook**:
 An Organization's sales knowledge: the material it uploaded and what was derived from its past sales.
 _Avoid_: Knowledge base, training data, brain
