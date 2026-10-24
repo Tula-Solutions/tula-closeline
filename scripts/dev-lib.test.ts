@@ -129,7 +129,7 @@ describe('secrets', () => {
     expect(secrets.playbookToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.voiceCoreToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.unsubscribeTokenKey).toMatch(/^[0-9a-f]{64}$/)
-    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 4)
+    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 5)
   })
 
   test('differ on every run when the real generator is used', () => {
@@ -228,7 +228,9 @@ describe('buildStackEnv', () => {
     const env = build()
     expect(env.auth.CORE_BASE_URL).toBe('http://127.0.0.1:3100')
     expect(env.auth.CORE_INTERNAL_TOKEN).toBe(secrets.internalToken)
-    expect(env.core.INTERNAL_API_TOKENS).toBe(`${secrets.internalToken},${secrets.voiceCoreToken}`)
+    expect(env.core.INTERNAL_API_TOKENS).toBe(
+      `${secrets.internalToken},${secrets.voiceCoreToken},${secrets.outboundCoreToken}`
+    )
     expect(env.auth.CORE_INTERNAL_TOKEN?.length).toBeGreaterThanOrEqual(32)
   })
 
@@ -337,6 +339,18 @@ describe('buildStackEnv', () => {
     expect(env.core.AUDIT_QUEUE_URL).toBe('http://127.0.0.1:9324/000000000000/core-audit')
     expect(env.core.QUEUE_ENDPOINT).toBe('http://127.0.0.1:9324')
     expect(JSON.stringify(env.auth)).not.toContain(env.core.UNSUBSCRIBE_TOKEN_KEY ?? 'x')
+  })
+
+  test('outbound reaches core internally with its own secret, which core also accepts', () => {
+    const env = build()
+    expect(env.outbound.CORE_URL).toBe('http://127.0.0.1:3100')
+    expect(env.outbound.CORE_INTERNAL_SECRET).toBe(secrets.outboundCoreToken)
+    expect(env.core.INTERNAL_API_TOKENS?.split(',')).toContain(secrets.outboundCoreToken)
+    expect(secrets.outboundCoreToken).not.toBe(secrets.voiceCoreToken)
+    expect(secrets.outboundCoreToken).not.toBe(secrets.internalToken)
+    expect(secretValues(secrets)).toContain(secrets.outboundCoreToken)
+    expect(JSON.stringify(env.voice)).not.toContain(secrets.outboundCoreToken)
+    expect(JSON.stringify(env.portal)).not.toContain(secrets.outboundCoreToken)
   })
 
   test('voice reaches core internally with its own secret, which core also accepts', () => {

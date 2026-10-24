@@ -160,6 +160,8 @@ export type Secrets = {
   playbookToken: string
   /** The bearer secret voice presents to core's internal directory; core lists it beside auth's. */
   voiceCoreToken: string
+  /** The bearer secret outbound presents to core's internal Prospect routes; core lists it too. */
+  outboundCoreToken: string
   /** The key core signs and checks unsubscribe tokens with. */
   unsubscribeTokenKey: string
 }
@@ -175,6 +177,7 @@ export function generateSecrets(random: (size: number) => Buffer = randomBytes):
     internalToken: randomHex(32, random),
     playbookToken: randomHex(32, random),
     voiceCoreToken: randomHex(32, random),
+    outboundCoreToken: randomHex(32, random),
     unsubscribeTokenKey: randomHex(32, random),
   }
 }
@@ -186,6 +189,7 @@ export function secretValues(secrets: Secrets): string[] {
     secrets.internalToken,
     secrets.playbookToken,
     secrets.voiceCoreToken,
+    secrets.outboundCoreToken,
     secrets.unsubscribeTokenKey,
   ]
 }
@@ -620,8 +624,8 @@ export function buildStackEnv(options: {
       AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
       AUTH_ISSUER: where.auth,
       AUTH_AUDIENCE: 'closeline',
-      // Auth's secret and voice's, comma separated (core accepts several).
-      INTERNAL_API_TOKENS: `${secrets.internalToken},${secrets.voiceCoreToken}`,
+      // Auth's, voice's and outbound's secrets, comma separated (core accepts several).
+      INTERNAL_API_TOKENS: `${secrets.internalToken},${secrets.voiceCoreToken},${secrets.outboundCoreToken}`,
       PORTAL_BASE_URL: where.portal,
       MAIL_LOCAL_URL: where.mail,
       UNSUBSCRIBE_TOKEN_KEY: secrets.unsubscribeTokenKey,
@@ -674,6 +678,9 @@ export function buildStackEnv(options: {
       ...base,
       ...common,
       PORT: String(ports.outbound),
+      // Where the enrichment waterfall reads a Prospect and writes enriched fields back.
+      CORE_URL: where.core,
+      CORE_INTERNAL_SECRET: secrets.outboundCoreToken,
     },
     portal: {
       ...base,
