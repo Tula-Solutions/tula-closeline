@@ -217,6 +217,7 @@ describe('runUp order', () => {
       'auth',
       'playbook',
       'voice',
+      'outbound',
       'portal',
     ])
     expect(spawned[0]?.cmd).toEqual([
@@ -279,6 +280,16 @@ describe('runUp order', () => {
     expect(h.calls[voice]?.env?.PORT).toBe('3004')
     expect(h.calls[voice]?.env?.TELEPHONY_PROVIDER).toBe('memory')
     expect(h.said.some((line) => line.includes('127.0.0.1:3004'))).toBe(true)
+  })
+
+  test('starts outbound from its clone with its own port and the shared local settings', async () => {
+    const h = harness()
+    await runUp(h.context, h.deps)
+    const outbound = h.calls.find((call) => call.kind === 'spawn' && call.name === 'outbound')
+    expect(outbound?.cwd).toBe('/clones/tula-closeline-outbound')
+    expect(outbound?.cmd).toEqual([h.context.execPath, '--no-env-file', 'src/server.ts'])
+    expect(outbound?.env?.PORT).toBe('3005')
+    expect(outbound?.env?.ENVIRONMENT).toBe('local')
   })
 
   test('a busy voice port stops the start', async () => {
@@ -501,6 +512,7 @@ describe('redaction reaches every step', () => {
       'auth',
       'playbook',
       'voice',
+      'outbound',
       'portal',
     ])
     for (const call of steps) {
@@ -524,7 +536,7 @@ describe('a real Google client secret', () => {
     })
     await runUp(h.context, h.deps)
     const services = h.calls.filter((call) => call.kind === 'spawn')
-    expect(services.length).toBe(5)
+    expect(services.length).toBe(6)
     for (const call of services) {
       expect(call.secrets).toContain(real)
     }
@@ -828,6 +840,7 @@ describe('ports of a stack that is partly up', () => {
       'auth',
       'core',
       'fake Google',
+      'outbound',
       'playbook',
       'portal',
       'voice',
