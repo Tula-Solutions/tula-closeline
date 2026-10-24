@@ -98,6 +98,11 @@ describe('resolvePorts', () => {
     expect(() => resolvePorts({ CLOSELINE_DEV_PLAYBOOK_PORT: '3001' })).toThrow('both 3001')
   })
 
+  test('the outbound port defaults to 3005 and can be moved', () => {
+    expect(resolvePorts({}).outbound).toBe(3005)
+    expect(resolvePorts({ CLOSELINE_DEV_OUTBOUND_PORT: '3015' }).outbound).toBe(3015)
+  })
+
   test('the voice port defaults to the one the portal expects and can be moved', () => {
     expect(resolvePorts({}).voice).toBe(3004)
     expect(resolvePorts({ CLOSELINE_DEV_VOICE_PORT: '3014' }).voice).toBe(3014)
@@ -637,6 +642,7 @@ describe('serviceDefinitions', () => {
       'auth',
       'playbook',
       'voice',
+      'outbound',
       'portal',
     ])
     for (const definition of definitions) {
@@ -658,6 +664,14 @@ describe('serviceDefinitions', () => {
     expect(voice?.cmd).toEqual(['/bin/bun', '--no-env-file', 'src/server.ts'])
     expect(voice?.env).toBe('voice')
     expect(voice?.readyUrl).toBe('http://127.0.0.1:3004/readyz')
+  })
+
+  test('outbound runs from its clone like voice, ready when /readyz answers', () => {
+    const outbound = definitions.find((definition) => definition.name === 'outbound')
+    expect(outbound?.sibling).toBe('outbound')
+    expect(outbound?.cmd).toEqual(['/bin/bun', '--no-env-file', 'src/server.ts'])
+    expect(outbound?.env).toBe('outbound')
+    expect(outbound?.readyUrl).toBe('http://127.0.0.1:3005/readyz')
   })
 
   test('the portal binds the loopback address on its own port and never moves to another', () => {
@@ -732,7 +746,7 @@ describe('checkSiblings', () => {
 
   test('is empty when every clone is there and installed', () => {
     const root = mkdtempSync(join(tmpdir(), 'closeline-dev-'))
-    for (const short of ['db', 'auth', 'core', 'playbook', 'voice', 'portal']) {
+    for (const short of ['db', 'auth', 'core', 'playbook', 'voice', 'outbound', 'portal']) {
       clone(root, short)
     }
     expect(checkSiblings(root)).toEqual([])
@@ -747,9 +761,10 @@ describe('checkSiblings', () => {
     expect(problems.some((p) => p.includes('tula-closeline-portal is missing'))).toBe(true)
     expect(problems.some((p) => p.includes('tula-closeline-playbook is missing'))).toBe(true)
     expect(problems.some((p) => p.includes('tula-closeline-voice is missing'))).toBe(true)
+    expect(problems.some((p) => p.includes('tula-closeline-outbound is missing'))).toBe(true)
     expect(problems.some((p) => p.includes('is not tula-closeline-auth'))).toBe(true)
     expect(problems.some((p) => p.includes('tula-closeline-core has no node_modules'))).toBe(true)
-    expect(problems).toHaveLength(5)
+    expect(problems).toHaveLength(6)
   })
 
   test('asks for vite when the portal has node_modules without it', () => {
@@ -1373,6 +1388,7 @@ describe('Sign in with Google in the dev stack', () => {
       'auth',
       'playbook',
       'voice',
+      'outbound',
       'portal',
     ])
     const [fake, ...rest] = serviceDefinitions('/bin/bun', DEFAULT_PORTS, true)
@@ -1381,6 +1397,13 @@ describe('Sign in with Google in the dev stack', () => {
     expect(fake?.cmd).toEqual(['/bin/bun', '--no-env-file', 'scripts/dev-fake-google.ts'])
     expect(fake?.env).toBe('fakeGoogle')
     expect(fake?.readyUrl).toBe('http://127.0.0.1:3010/readyz')
-    expect(rest.map((d) => d.name)).toEqual(['core', 'auth', 'playbook', 'voice', 'portal'])
+    expect(rest.map((d) => d.name)).toEqual([
+      'core',
+      'auth',
+      'playbook',
+      'voice',
+      'outbound',
+      'portal',
+    ])
   })
 })

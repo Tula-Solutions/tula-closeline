@@ -1,7 +1,7 @@
 # Local development
 
 One command runs the Closeline stack on your machine: Postgres 18, two local stand-ins and a local
-mailbox in Docker, then core, auth, the playbook, voice and the portal from their sibling clones. This is plan step 1.19
+mailbox in Docker, then core, auth, the playbook, voice, outbound and the portal from their sibling clones. This is plan step 1.19
 (hub issue 20); the mailbox and the end-to-end smoke test are hub issue 38.
 
 ```bash
@@ -29,7 +29,7 @@ stack, the smoke test and, for the portal, `agent-browser` to run the change for
   `unix://` socket: it cannot tell a daemon on this machine from a remote one reached through a
   forwarded socket (for example `ssh -L /tmp/docker.sock:/var/run/docker.sock`), so do not point
   `DOCKER_HOST` or a context at such a socket.
-- Clone `tula-closeline-db`, `-auth`, `-core`, `-playbook`, `-voice` and `-portal` next to this repo (or point
+- Clone `tula-closeline-db`, `-auth`, `-core`, `-playbook`, `-voice`, `-outbound` and `-portal` next to this repo (or point
   `CLOSELINE_SIBLINGS_DIR` at the folder that holds them) and run `bun install` in each. The git
   dependencies are private; if you have no SSH key on GitHub, do the one-time `gh auth setup-git`
   and `git config --global url...insteadOf` step in any clone's `README.md` ("Getting started").
@@ -52,6 +52,7 @@ it should be, has no `node_modules`, or a port is taken.
 | core | `http://127.0.0.1:3100` | `bun src/server.ts` in `tula-closeline-core` |
 | auth | `http://127.0.0.1:3001` | `bun src/server.ts` in `tula-closeline-auth` |
 | playbook | `http://127.0.0.1:3003` | `bun src/server.ts` in `tula-closeline-playbook`: the API, the ingestion job loop (documents, Calls, Recordings, Deal imports) and the sweeps, all in this one process (see "The playbook" below) |
+| outbound | `http://127.0.0.1:3005` | `bun src/server.ts` in `tula-closeline-outbound`; health routes only so far |
 | voice | `http://127.0.0.1:3004` | `bun src/server.ts` in `tula-closeline-voice` with `TELEPHONY_PROVIDER=memory` (see "Voice" below) |
 | portal | `http://127.0.0.1:3002` | Vite dev server in `tula-closeline-portal` |
 | fake Google | `http://127.0.0.1:3010` | `bun scripts/dev-fake-google.ts` in this repo, started only when no `GOOGLE_*` is set in your shell (see "Sign in with Google" below) |
@@ -60,7 +61,7 @@ Ports 5434 to 5437 are the repos' own test databases and 5432 is left for whatev
 the dev Postgres is on 5440. Mailpit's usual port 8025 is often taken by another project's mailbox,
 so this one is on 8026. Override any port with `CLOSELINE_DEV_POSTGRES_PORT`,
 `CLOSELINE_DEV_QUEUE_PORT`, `CLOSELINE_DEV_STORAGE_PORT`, `CLOSELINE_DEV_MAIL_PORT`,
-`CLOSELINE_DEV_AUTH_PORT`, `CLOSELINE_DEV_CORE_PORT`, `CLOSELINE_DEV_PLAYBOOK_PORT`, `CLOSELINE_DEV_VOICE_PORT` (3004), `CLOSELINE_DEV_PORTAL_PORT` and `CLOSELINE_DEV_FAKE_GOOGLE_PORT` (3010). Every port binds to `127.0.0.1` only.
+`CLOSELINE_DEV_AUTH_PORT`, `CLOSELINE_DEV_CORE_PORT`, `CLOSELINE_DEV_PLAYBOOK_PORT`, `CLOSELINE_DEV_VOICE_PORT` (3004), `CLOSELINE_DEV_OUTBOUND_PORT` (3005), `CLOSELINE_DEV_PORTAL_PORT` and `CLOSELINE_DEV_FAKE_GOOGLE_PORT` (3010). Every port binds to `127.0.0.1` only.
 Every image is pinned to an exact version and digest in `compose.dev.yaml`.
 
 Why these stand-ins: ADR 0001 gives each Region its own queues, and the plan (steps 1.10, 1.12 and

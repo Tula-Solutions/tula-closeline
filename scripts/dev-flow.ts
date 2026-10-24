@@ -291,6 +291,7 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       { name: 'core', port: ports.core },
       { name: 'playbook', port: ports.playbook },
       { name: 'voice', port: ports.voice },
+      { name: 'outbound', port: ports.outbound },
       { name: 'portal', port: ports.portal },
       ...(stack.fakeGoogle ? [{ name: 'fake Google', port: ports.fakeGoogle }] : []),
       ...notRunning,
@@ -454,6 +455,7 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
         deps.say(
           `voice   ${where.voice}  (Lines; numbers come from an in-memory stand-in, never Twilio)`
         )
+        deps.say(`outbound ${where.outbound}  (health routes only so far)`)
         deps.say(`portal  ${where.portal}`)
         deps.say(
           stack.fakeGoogle
