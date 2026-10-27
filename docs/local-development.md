@@ -240,7 +240,9 @@ never written to a file and never printed (output is also scrubbed of their valu
   after the playbook's own in its `INTERNAL_API_TOKENS`); voice's `PLAYBOOK_INTERNAL_URL` is the
   playbook's origin (a voice build without those settings ignores them), and
 - the internal secret voice presents to core's internal directory (`CORE_INTERNAL_TOKEN` in voice,
-  listed after auth's in core's `INTERNAL_API_TOKENS`); voice's `CORE_INTERNAL_URL` is core's origin.
+  listed after auth's in core's `INTERNAL_API_TOKENS`); voice's `CORE_INTERNAL_URL` is core's origin, and
+- the internal secret core presents to voice's internal routes (`VOICE_INTERNAL_TOKEN` in core, voice's
+  `INTERNAL_API_TOKENS`); core's `VOICE_INTERNAL_URL` is voice's origin.
 
 One value is fixed: auth's `AUTH_MASTER_KEY` is left unset, so auth uses its built-in development
 key, which it refuses outside `ENVIRONMENT=local`. It seals the signing keys stored in the

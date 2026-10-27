@@ -33,14 +33,15 @@ describe('the real effects wired in dev.ts', () => {
     expect(first.equals(salt())).toBe(false)
   })
 
-  test('secrets are fresh for every run and cover every role and all four internal tokens', () => {
+  test('secrets are fresh for every run and cover every role and all five internal tokens', () => {
     const a = createDeps().secrets
     const b = createDeps().secrets
-    expect(new Set(secretValues(a)).size).toBe(13)
+    expect(new Set(secretValues(a)).size).toBe(14)
     expect(a.internalToken).not.toBe(b.internalToken)
     expect(a.playbookToken).not.toBe(b.playbookToken)
     expect(a.voiceCoreToken).not.toBe(b.voiceCoreToken)
     expect(a.outboundCoreToken).not.toBe(b.outboundCoreToken)
+    expect(a.coreVoiceToken).not.toBe(b.coreVoiceToken)
     expect(a.voicePlaybookToken).not.toBe(b.voicePlaybookToken)
     expect(a.passwords.closeline_auth).not.toBe(b.passwords.closeline_auth)
     for (const value of secretValues(a)) {
