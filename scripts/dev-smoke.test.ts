@@ -11,6 +11,7 @@ import {
   VOICE_STEPS,
 } from './dev-smoke.ts'
 import { type FakeOptions, fakeStack } from './dev-smoke-fake.ts'
+import { MAILBOX_STEPS } from './dev-smoke-mailbox.ts'
 
 const by = (results: StepResult[], name: string) => results.find((result) => result.name === name)
 const fast = {
@@ -101,7 +102,7 @@ describe('runSmoke without a mailbox for auth', () => {
     expect(signUp?.status).toBe('skip')
     expect(signUp?.detail).toContain('mail.unavailable')
     expect(results.filter((result) => result.status === 'skip')).toHaveLength(
-      ACCOUNT_STEPS.length + SALES_HISTORY_STEPS.length + VOICE_STEPS.length
+      ACCOUNT_STEPS.length + SALES_HISTORY_STEPS.length + VOICE_STEPS.length + MAILBOX_STEPS.length
     )
     const verify = by(results, 'verify the email code')
     expect(verify?.status).toBe('skip')

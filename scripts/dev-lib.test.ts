@@ -128,8 +128,9 @@ describe('secrets', () => {
     expect(secrets.internalToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.playbookToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.voiceCoreToken).toMatch(/^[0-9a-f]{64}$/)
+    expect(secrets.voicePlaybookToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.unsubscribeTokenKey).toMatch(/^[0-9a-f]{64}$/)
-    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 5)
+    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 6)
   })
 
   test('differ on every run when the real generator is used', () => {
@@ -370,10 +371,26 @@ describe('buildStackEnv', () => {
     expect(env.playbook.QUEUE_URL).toBe('http://127.0.0.1:9324/000000000000/closeline-playbook')
     expect(env.playbook.STORAGE_ENDPOINT).toBe('http://127.0.0.1:9090')
     expect(env.playbook.STORAGE_BUCKET).toBe('closeline-dev')
-    expect(env.playbook.INTERNAL_API_TOKENS).toBe(secrets.playbookToken)
+    expect(env.playbook.INTERNAL_API_TOKENS?.split(',')).toEqual([
+      secrets.playbookToken,
+      secrets.voicePlaybookToken,
+    ])
     expect(secrets.playbookToken).not.toBe(secrets.internalToken)
     expect(JSON.stringify(env.core)).not.toContain(secrets.playbookToken)
     expect(JSON.stringify(env.auth)).not.toContain(secrets.playbookToken)
+  })
+
+  test('voice reaches the playbook internally with its own secret, which the playbook also accepts', () => {
+    const env = build()
+    expect(env.voice.PLAYBOOK_INTERNAL_URL).toBe('http://127.0.0.1:3003')
+    expect(env.voice.PLAYBOOK_INTERNAL_TOKEN).toBe(secrets.voicePlaybookToken)
+    expect(env.playbook.INTERNAL_API_TOKENS?.split(',')).toContain(secrets.voicePlaybookToken)
+    expect(secrets.voicePlaybookToken).not.toBe(secrets.playbookToken)
+    expect(secretValues(secrets)).toContain(secrets.voicePlaybookToken)
+    for (const service of ['auth', 'core', 'outbound', 'portal'] as const) {
+      expect(JSON.stringify(env[service])).not.toContain(secrets.voicePlaybookToken)
+    }
+    expect(JSON.stringify(env.voice)).not.toContain(secrets.playbookToken)
   })
 
   test('the playbook gets no setting that would turn its in-process stand-ins off or on elsewhere', () => {
@@ -395,6 +412,17 @@ describe('buildStackEnv', () => {
     )
     expect(env.voice.TELEPHONY_PROVIDER).toBe('memory')
     expect(Object.keys(env.voice).filter((name) => name.startsWith('TWILIO'))).toEqual([])
+  })
+
+  test('outbound logs in as closeline_outbound on the dev port and verifies auth tokens like core', () => {
+    const env = build()
+    expect(env.outbound.DATABASE_URL).toBe(
+      `postgres://closeline_outbound:${secrets.passwords.closeline_outbound}@127.0.0.1:5440/closeline`
+    )
+    expect(env.outbound.AUTH_ISSUER).toBe(env.auth.PUBLIC_URL)
+    expect(env.outbound.AUTH_AUDIENCE).toBe(env.auth.TOKEN_AUDIENCE)
+    expect(env.outbound.AUTH_JWKS_URL).toBe(`${env.auth.PUBLIC_URL}/.well-known/jwks.json`)
+    expect(env.outbound.REGION).toBe('us')
   })
 
   test('every service runs as local and each logs in as its own database role on the dev port', () => {
@@ -420,8 +448,9 @@ describe('buildStackEnv', () => {
       core: secrets.passwords.closeline_core,
       playbook: secrets.passwords.closeline_playbook,
       voice: secrets.passwords.closeline_voice,
+      outbound: secrets.passwords.closeline_outbound,
     }
-    for (const service of ['auth', 'core', 'playbook', 'voice'] as const) {
+    for (const service of ['auth', 'core', 'playbook', 'voice', 'outbound'] as const) {
       const text = JSON.stringify(env[service])
       for (const role of ROLES) {
         const password = secrets.passwords[role]
@@ -1308,7 +1337,23 @@ describe('Sign in with Google in the dev stack', () => {
       FAKE_GOOGLE_CLIENT_ID: FAKE_GOOGLE_CLIENT_ID,
       FAKE_GOOGLE_CLIENT_SECRET: FAKE_GOOGLE_CLIENT_SECRET,
       FAKE_GOOGLE_REDIRECT_URI: CALLBACK,
+      FAKE_GOOGLE_MAIL_REDIRECT_URI: 'http://127.0.0.1:3002/mailboxes/connect/callback',
     })
+  })
+
+  test('outbound sends Gmail Mailboxes to the fake, and to real Google never', () => {
+    const { outbound } = build()
+    expect(outbound.GOOGLE_CLIENT_ID).toBe(FAKE_GOOGLE_CLIENT_ID)
+    expect(outbound.GOOGLE_CLIENT_SECRET).toBe(FAKE_GOOGLE_CLIENT_SECRET)
+    expect(outbound.GOOGLE_AUTH_URL).toBe('http://127.0.0.1:3010/authorize')
+    expect(outbound.GOOGLE_TOKEN_URL).toBe('http://127.0.0.1:3010/token')
+    expect(outbound.GOOGLE_REVOKE_URL).toBe('http://127.0.0.1:3010/revoke')
+    expect(outbound.GMAIL_API_BASE_URL).toBe('http://127.0.0.1:3010')
+    expect(outbound.MAIL_OAUTH_REDIRECT_URI).toBe(
+      'http://127.0.0.1:3002/mailboxes/connect/callback'
+    )
+    const realEnv = build(real).outbound
+    expect(Object.keys(realEnv).filter((key) => /^(GOOGLE|GMAIL|MAIL_OAUTH)/.test(key))).toEqual([])
   })
 
   test('the fake and the redirect URI follow moved ports', () => {

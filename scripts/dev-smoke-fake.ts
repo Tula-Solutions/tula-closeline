@@ -1,3 +1,4 @@
+import { createOutboundFake, type OutboundFakeOptions } from './dev-smoke-outbound-fake.ts'
 import { createPlaybookFake, type PlaybookFakeOptions } from './dev-smoke-playbook-fake.ts'
 import { createVoiceFake, type VoiceFakeOptions } from './dev-smoke-voice-fake.ts'
 
@@ -97,6 +98,8 @@ export type FakeOptions = {
   playbook?: PlaybookFakeOptions
   /** What is broken in voice: see dev-smoke-voice-fake.ts. */
   voice?: VoiceFakeOptions
+  /** What is broken in outbound's Mailbox routes: see dev-smoke-outbound-fake.ts. */
+  outbound?: OutboundFakeOptions
   /**
    * Sign in with Google. `off`: auth-options says Google is off. `real`: the authorization URL is
    * on accounts.google.com. The rest break one thing: a callback that can be replayed, a returning
@@ -149,6 +152,7 @@ export function fakeStack(options: FakeOptions = {}) {
   >()
   const googleCodes = new Map<string, string>()
   const googleEmails: string[] = []
+  const sentTo: string[] = []
   const googleSecrets: string[] = []
   const portalPaths: string[] = []
   let googleAuthorizeHits = 0
@@ -775,6 +779,28 @@ export function fakeStack(options: FakeOptions = {}) {
     },
   })
 
+  const outboundHandler = createOutboundFake({
+    orgOf: (token) => sessions.get(token)?.orgId,
+    googleOrigin: () => origins.google,
+    portalOrigin: () => origins.portal,
+    deliver: (to) => sentTo.push(to),
+    options: options.outbound,
+  })
+  const outboundServer = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      seen.push({
+        method: request.method,
+        path: url.pathname,
+        body: await request.clone().text(),
+        key: request.headers.get('idempotency-key'),
+      })
+      return outboundHandler(request)
+    },
+  })
+
   const serve = (which: 'auth' | 'core' | 'portal' | 'mail') =>
     Bun.serve({
       port: 0,
@@ -830,20 +856,30 @@ export function fakeStack(options: FakeOptions = {}) {
     hostname: '127.0.0.1',
     fetch: async (request) => {
       const url = new URL(request.url)
+      if (url.pathname === '/fake/sent') {
+        return Response.json({ messages: sentTo.map((to) => ({ to })) })
+      }
       if (url.pathname !== '/authorize') {
         return new Response('not found', { status: 404 })
       }
-      googleAuthorizeHits++
+      // The Mailbox connection also authorizes here; only Sign in with Google is counted.
+      const form = new URLSearchParams(request.method === 'GET' ? '' : await request.text())
+      const redirectUri = url.searchParams.get('redirect_uri') ?? form.get('redirect_uri') ?? ''
+      const forMailbox = redirectUri.endsWith('/mailboxes/connect/callback')
+      if (!forMailbox) {
+        googleAuthorizeHits++
+      }
       if (request.method === 'GET') {
         return new Response('<!doctype html><form method="post"><input name="email"></form>', {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         })
       }
-      const form = new URLSearchParams(await request.text())
       const email = (form.get('email') ?? '').toLowerCase()
       const code = next('gcode')
       googleCodes.set(code, email)
-      googleEmails.push(email)
+      if (!forMailbox) {
+        googleEmails.push(email)
+      }
       googleSecrets.push(email, code)
       const back = new URL(form.get('redirect_uri') ?? '')
       back.searchParams.set('code', code)
@@ -860,6 +896,7 @@ export function fakeStack(options: FakeOptions = {}) {
     mail: serve('mail'),
     playbook: playbookServer,
     voice: voiceServer,
+    outbound: outboundServer,
   }
   const origin = (name: keyof typeof servers) => `http://127.0.0.1:${servers[name].port}`
   origins.portal = origin('portal')
@@ -880,6 +917,7 @@ export function fakeStack(options: FakeOptions = {}) {
       core: origin('core'),
       playbook: origin('playbook'),
       voice: origin('voice'),
+      outbound: origin('outbound'),
       portal: origin('portal'),
       mail: origin('mail'),
     },

@@ -1,7 +1,10 @@
 // A fake Google OpenID provider for `bun run dev`, so Sign in with Google works on a laptop with no
 // Google Cloud project. It serves discovery, the signing keys, an `/authorize` page where the
-// person types (or is hinted) an email, and `/token`, which returns an RS256 ID token. It listens
-// on the loopback interface only and holds everything in memory. It is run as its own process by
+// person types (or is hinted) an email, and `/token`, which returns an RS256 ID token (and, for an
+// `access_type=offline` request, a refresh token). For outbound's Gmail Mailboxes it also serves
+// the `refresh_token` grant, `/revoke` and Gmail's `users.messages.send`; a sent message is kept in
+// memory and listed at `GET /fake/sent` (headers only, never the body). It listens on the loopback
+// interface only and holds everything in memory. It is run as its own process by
 // `dev.ts`: `bun scripts/dev-fake-google.ts` with FAKE_GOOGLE_* variables (see `main` below).
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 
@@ -14,8 +17,12 @@ export const FAKE_GOOGLE_CLIENT_SECRET = 'closeline-dev-fake-google-client-secre
 const CODE_TTL_MS = 10 * 60_000
 /** The most codes held at once; the oldest is dropped beyond this. */
 const MAX_CODES = 1_000
-/** The longest request body read. */
+/** The longest request body read for the OAuth routes. */
 const MAX_BODY_BYTES = 16_384
+/** The longest body of a Gmail send (a base64url RFC 822 message). */
+const MAX_SEND_BYTES = 262_144
+/** The most tokens and sent messages held at once; the oldest is dropped beyond this. */
+const MAX_HELD = 1_000
 const KEY_ID = 'fake-google-1'
 const EMAIL_PATTERN = /^[^\s@<>"']{1,64}@[^\s@<>"']{1,255}$/
 
@@ -34,11 +41,21 @@ export type FakeGoogleOptions = {
   port: number
   clientId: string
   clientSecret: string
-  /** The one redirect URI it will send a browser back to. */
+  /** The redirect URI it will send a browser back to. */
   redirectUri: string
+  /** A second redirect URI (outbound's Mailbox callback), accepted the same way. */
+  mailRedirectUri?: string
 }
 
-type Pending = { email: string; nonce: string; challenge: string; redirectUri: string; at: number }
+type Pending = {
+  email: string
+  nonce: string
+  challenge: string
+  redirectUri: string
+  offline: boolean
+  at: number
+}
+type Held = { email: string; refreshToken: string; expiresAt: number }
 
 /** A stable Google-style numeric `sub` for an email, so a returning person is recognised. */
 export function subjectOf(email: string): string {
@@ -75,8 +92,8 @@ function oauthError(error: string, status = 400): Response {
   return Response.json({ error }, { status, headers: { 'cache-control': 'no-store' } })
 }
 
-/** Reads a body of at most {@link MAX_BODY_BYTES} bytes, or undefined if it is longer. */
-async function boundedText(request: Request): Promise<string | undefined> {
+/** Reads a body of at most `limit` bytes, or undefined if it is longer. */
+async function boundedText(request: Request, limit = MAX_BODY_BYTES): Promise<string | undefined> {
   const reader = request.body?.getReader()
   if (!reader) {
     return ''
@@ -89,7 +106,7 @@ async function boundedText(request: Request): Promise<string | undefined> {
       break
     }
     size += value.byteLength
-    if (size > MAX_BODY_BYTES) {
+    if (size > limit) {
       await reader.cancel()
       return undefined
     }
@@ -117,18 +134,44 @@ export async function startFakeGoogle(options: FakeGoogleOptions): Promise<FakeG
     use: 'sig',
   }
   const codes = new Map<string, Pending>()
-  const redirectOrigin = new URL(options.redirectUri).origin
+  const redirects = [options.redirectUri, options.mailRedirectUri ?? options.redirectUri]
+  const redirectOrigins = [...new Set(redirects.map((uri) => new URL(uri).origin))].join(' ')
+  // Refresh tokens by value (the email they were issued for), access tokens by value.
+  const refreshTokens = new Map<string, string>()
+  const accessTokens = new Map<string, Held>()
+  const sent: {
+    id: string
+    threadId: string
+    from: string
+    to: string
+    subject: string
+    at: string
+    bytes: number
+  }[] = []
   let issuer = ''
+  const hold = <T>(map: Map<string, T>, key: string, value: T) => {
+    map.set(key, value)
+    if (map.size > MAX_HELD) {
+      map.delete(map.keys().next().value as string)
+    }
+  }
+  const mintAccessToken = (email: string, refreshToken: string) => {
+    const accessToken = `fake-at-${randomBytes(24).toString('base64url')}`
+    hold(accessTokens, accessToken, { email, refreshToken, expiresAt: Date.now() + 3_600_000 })
+    return accessToken
+  }
 
   /** Checks the parameters of an authorization request; returns why not, or the values. */
   function checkAuthorize(
     params: URLSearchParams
-  ): { problem: string } | { nonce: string; challenge: string; state: string } {
+  ):
+    | { problem: string }
+    | { nonce: string; challenge: string; state: string; redirectUri: string } {
     const get = (name: string) => params.get(name) ?? ''
     if (get('client_id') !== options.clientId) {
       return { problem: 'unknown client_id' }
     }
-    if (get('redirect_uri') !== options.redirectUri) {
+    if (!redirects.includes(get('redirect_uri'))) {
       return { problem: 'redirect_uri is not the registered one' }
     }
     if (get('response_type') !== 'code') {
@@ -140,10 +183,23 @@ export async function startFakeGoogle(options: FakeGoogleOptions): Promise<FakeG
     if (get('state') === '') {
       return { problem: 'state is required' }
     }
-    return { nonce: get('nonce'), challenge: get('code_challenge'), state: get('state') }
+    return {
+      nonce: get('nonce'),
+      challenge: get('code_challenge'),
+      state: get('state'),
+      redirectUri: get('redirect_uri'),
+    }
   }
 
-  const carried = ['client_id', 'redirect_uri', 'response_type', 'scope', 'state', 'nonce'] as const
+  const carried = [
+    'client_id',
+    'redirect_uri',
+    'response_type',
+    'scope',
+    'state',
+    'nonce',
+    'access_type',
+  ] as const
 
   function page(params: URLSearchParams): Response {
     const hint = escapeHtml((params.get('login_hint') ?? '').slice(0, 320))
@@ -178,7 +234,7 @@ export async function startFakeGoogle(options: FakeGoogleOptions): Promise<FakeG
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
         // No script at all; the form may only post back here and the redirect goes to the portal.
-        'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${redirectOrigin}; base-uri 'none'`,
+        'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${redirectOrigins}; base-uri 'none'`,
         'referrer-policy': 'no-referrer',
       },
     })
@@ -211,10 +267,11 @@ export async function startFakeGoogle(options: FakeGoogleOptions): Promise<FakeG
       email,
       nonce: checked.nonce,
       challenge: checked.challenge,
-      redirectUri: options.redirectUri,
+      redirectUri: checked.redirectUri,
+      offline: params.get('access_type') === 'offline',
       at: now,
     })
-    const back = new URL(options.redirectUri)
+    const back = new URL(checked.redirectUri)
     back.searchParams.set('code', code)
     back.searchParams.set('state', checked.state)
     return new Response(null, {
@@ -223,32 +280,7 @@ export async function startFakeGoogle(options: FakeGoogleOptions): Promise<FakeG
     })
   }
 
-  async function token(request: Request): Promise<Response> {
-    const body = await boundedText(request)
-    if (body === undefined) {
-      return oauthError('invalid_request', 413)
-    }
-    const form = new URLSearchParams(body)
-    const code = form.get('code') ?? ''
-    // A code is spent by the first attempt, right or wrong.
-    const entry = codes.get(code)
-    codes.delete(code)
-    if (
-      form.get('grant_type') !== 'authorization_code' ||
-      !entry ||
-      Date.now() - entry.at > CODE_TTL_MS ||
-      form.get('client_id') !== options.clientId ||
-      !sameSecret(form.get('client_secret') ?? '', options.clientSecret) ||
-      form.get('redirect_uri') !== entry.redirectUri ||
-      !sameSecret(
-        createHash('sha256')
-          .update(form.get('code_verifier') ?? '')
-          .digest('base64url'),
-        entry.challenge
-      )
-    ) {
-      return oauthError('invalid_grant')
-    }
+  async function idToken(entry: Pending): Promise<string> {
     const now = Math.floor(Date.now() / 1000)
     const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: KEY_ID }))
     const payload = base64url(
@@ -269,9 +301,61 @@ export async function startFakeGoogle(options: FakeGoogleOptions): Promise<FakeG
       pair.privateKey,
       new TextEncoder().encode(`${header}.${payload}`)
     )
+    return `${header}.${payload}.${base64url(signature)}`
+  }
+
+  const clientOk = (form: URLSearchParams) =>
+    form.get('client_id') === options.clientId &&
+    sameSecret(form.get('client_secret') ?? '', options.clientSecret)
+
+  async function token(request: Request): Promise<Response> {
+    const body = await boundedText(request)
+    if (body === undefined) {
+      return oauthError('invalid_request', 413)
+    }
+    const form = new URLSearchParams(body)
+    if (form.get('grant_type') === 'refresh_token') {
+      const email = refreshTokens.get(form.get('refresh_token') ?? '')
+      if (!clientOk(form) || email === undefined) {
+        return oauthError('invalid_grant')
+      }
+      return Response.json(
+        {
+          access_token: mintAccessToken(email, form.get('refresh_token') ?? ''),
+          token_type: 'Bearer',
+          expires_in: 3600,
+        },
+        { headers: { 'cache-control': 'no-store' } }
+      )
+    }
+    const code = form.get('code') ?? ''
+    // A code is spent by the first attempt, right or wrong.
+    const entry = codes.get(code)
+    codes.delete(code)
+    if (
+      form.get('grant_type') !== 'authorization_code' ||
+      !entry ||
+      Date.now() - entry.at > CODE_TTL_MS ||
+      !clientOk(form) ||
+      form.get('redirect_uri') !== entry.redirectUri ||
+      !sameSecret(
+        createHash('sha256')
+          .update(form.get('code_verifier') ?? '')
+          .digest('base64url'),
+        entry.challenge
+      )
+    ) {
+      return oauthError('invalid_grant')
+    }
+    const refreshToken = entry.offline ? `fake-rt-${randomBytes(24).toString('base64url')}` : ''
+    if (entry.offline) {
+      hold(refreshTokens, refreshToken, entry.email)
+    }
     return Response.json(
       {
-        id_token: `${header}.${payload}.${base64url(signature)}`,
+        id_token: await idToken(entry),
+        access_token: mintAccessToken(entry.email, refreshToken),
+        ...(entry.offline ? { refresh_token: refreshToken } : {}),
         token_type: 'Bearer',
         expires_in: 3600,
       },
@@ -279,12 +363,70 @@ export async function startFakeGoogle(options: FakeGoogleOptions): Promise<FakeG
     )
   }
 
+  async function revoke(request: Request): Promise<Response> {
+    const body = await boundedText(request)
+    if (body === undefined) {
+      return oauthError('invalid_request', 413)
+    }
+    const value = new URLSearchParams(body).get('token') ?? ''
+    if (refreshTokens.delete(value)) {
+      // Revoking a refresh token ends the access tokens made from it, as Google does.
+      for (const [key, held] of accessTokens) {
+        if (held.refreshToken === value) {
+          accessTokens.delete(key)
+        }
+      }
+      return new Response(null, { status: 200 })
+    }
+    return accessTokens.delete(value)
+      ? new Response(null, { status: 200 })
+      : oauthError('invalid_token')
+  }
+
+  async function send(request: Request): Promise<Response> {
+    const bearer = /^Bearer (.+)$/.exec(request.headers.get('authorization') ?? '')?.[1] ?? ''
+    const held = accessTokens.get(bearer)
+    if (held === undefined || held.expiresAt < Date.now()) {
+      return Response.json({ error: { code: 401, status: 'UNAUTHENTICATED' } }, { status: 401 })
+    }
+    const body = await boundedText(request, MAX_SEND_BYTES)
+    let payload: { raw?: unknown; threadId?: unknown } = {}
+    try {
+      payload = body === undefined ? {} : JSON.parse(body)
+    } catch {
+      // answered below as a bad request
+    }
+    if (typeof payload.raw !== 'string' || payload.raw === '') {
+      return Response.json({ error: { code: 400, status: 'INVALID_ARGUMENT' } }, { status: 400 })
+    }
+    // Only the headers are kept for inspection; the body of a message is never stored or logged.
+    const message = Buffer.from(payload.raw, 'base64url').toString('utf8')
+    const head = message.split(/\r?\n\r?\n/, 1)[0] ?? ''
+    const header = (name: string) =>
+      new RegExp(`^${name}:[ \\t]*(.*)$`, 'im').exec(head)?.[1]?.trim() ?? ''
+    const id = randomBytes(8).toString('hex')
+    const threadId = typeof payload.threadId === 'string' ? payload.threadId : id
+    sent.push({
+      id,
+      threadId,
+      from: held.email,
+      to: header('To'),
+      subject: header('Subject'),
+      at: new Date().toISOString(),
+      bytes: Buffer.byteLength(message),
+    })
+    if (sent.length > MAX_HELD) {
+      sent.shift()
+    }
+    return Response.json({ id, threadId, labelIds: ['SENT'] })
+  }
+
   // No Host or Origin check and a constant client secret: this listens on loopback only, and auth's
   // state-and-cookie binding stops a forged callback, so neither adds protection here.
   const server = Bun.serve({
     port: options.port,
     hostname: '127.0.0.1',
-    maxRequestBodySize: MAX_BODY_BYTES,
+    maxRequestBodySize: MAX_SEND_BYTES,
     async fetch(request) {
       const url = new URL(request.url)
       const { pathname } = url
@@ -315,6 +457,15 @@ export async function startFakeGoogle(options: FakeGoogleOptions): Promise<FakeG
       if (request.method === 'POST' && pathname === '/token') {
         return token(request)
       }
+      if (request.method === 'POST' && pathname === '/revoke') {
+        return revoke(request)
+      }
+      if (request.method === 'POST' && pathname === '/gmail/v1/users/me/messages/send') {
+        return send(request)
+      }
+      if (request.method === 'GET' && pathname === '/fake/sent') {
+        return Response.json({ messages: sent }, { headers: { 'cache-control': 'no-store' } })
+      }
       return text(404, 'not found')
     },
   })
@@ -337,6 +488,7 @@ if (import.meta.main) {
     clientId: env.FAKE_GOOGLE_CLIENT_ID ?? FAKE_GOOGLE_CLIENT_ID,
     clientSecret: env.FAKE_GOOGLE_CLIENT_SECRET ?? FAKE_GOOGLE_CLIENT_SECRET,
     redirectUri: env.FAKE_GOOGLE_REDIRECT_URI,
+    mailRedirectUri: env.FAKE_GOOGLE_MAIL_REDIRECT_URI,
   })
   process.stdout.write(`fake Google listening on ${fake.issuer} (loopback only)\n`)
   const stop = () => {
