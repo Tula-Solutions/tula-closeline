@@ -129,8 +129,9 @@ describe('secrets', () => {
     expect(secrets.playbookToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.voiceCoreToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.voicePlaybookToken).toMatch(/^[0-9a-f]{64}$/)
+    expect(secrets.coreVoiceToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.unsubscribeTokenKey).toMatch(/^[0-9a-f]{64}$/)
-    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 6)
+    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 7)
   })
 
   test('differ on every run when the real generator is used', () => {
@@ -378,6 +379,18 @@ describe('buildStackEnv', () => {
     expect(secrets.playbookToken).not.toBe(secrets.internalToken)
     expect(JSON.stringify(env.core)).not.toContain(secrets.playbookToken)
     expect(JSON.stringify(env.auth)).not.toContain(secrets.playbookToken)
+  })
+
+  test('core reaches voice internally with its own secret, which voice also accepts', () => {
+    const env = build()
+    expect(env.core.VOICE_INTERNAL_URL).toBe('http://127.0.0.1:3004')
+    expect(env.core.VOICE_INTERNAL_TOKEN).toBe(secrets.coreVoiceToken)
+    expect(env.voice.INTERNAL_API_TOKENS?.split(',')).toEqual([secrets.coreVoiceToken])
+    expect(secrets.coreVoiceToken).toMatch(/^[\x20-\x7e]{32,512}$/)
+    expect(secretValues(secrets)).toContain(secrets.coreVoiceToken)
+    for (const service of ['auth', 'playbook', 'outbound', 'portal'] as const) {
+      expect(JSON.stringify(env[service])).not.toContain(secrets.coreVoiceToken)
+    }
   })
 
   test('voice reaches the playbook internally with its own secret, which the playbook also accepts', () => {

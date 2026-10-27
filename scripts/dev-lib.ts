@@ -164,6 +164,8 @@ export type Secrets = {
   voicePlaybookToken: string
   /** The bearer secret outbound presents to core's internal Prospect routes; core lists it too. */
   outboundCoreToken: string
+  /** The bearer secret core presents to voice's internal routes; voice lists it. */
+  coreVoiceToken: string
   /** The key core signs and checks unsubscribe tokens with. */
   unsubscribeTokenKey: string
 }
@@ -181,6 +183,7 @@ export function generateSecrets(random: (size: number) => Buffer = randomBytes):
     voiceCoreToken: randomHex(32, random),
     voicePlaybookToken: randomHex(32, random),
     outboundCoreToken: randomHex(32, random),
+    coreVoiceToken: randomHex(32, random),
     unsubscribeTokenKey: randomHex(32, random),
   }
 }
@@ -194,6 +197,7 @@ export function secretValues(secrets: Secrets): string[] {
     secrets.voiceCoreToken,
     secrets.voicePlaybookToken,
     secrets.outboundCoreToken,
+    secrets.coreVoiceToken,
     secrets.unsubscribeTokenKey,
   ]
 }
@@ -637,6 +641,9 @@ export function buildStackEnv(options: {
       AUTH_AUDIENCE: 'closeline',
       // Auth's, voice's and outbound's secrets, comma separated (core accepts several).
       INTERNAL_API_TOKENS: `${secrets.internalToken},${secrets.voiceCoreToken},${secrets.outboundCoreToken}`,
+      // Where core reads a Call's assessments from voice; it sends its own secret.
+      VOICE_INTERNAL_URL: where.voice,
+      VOICE_INTERNAL_TOKEN: secrets.coreVoiceToken,
       PORTAL_BASE_URL: where.portal,
       MAIL_LOCAL_URL: where.mail,
       UNSUBSCRIBE_TOKEN_KEY: secrets.unsubscribeTokenKey,
@@ -682,6 +689,8 @@ export function buildStackEnv(options: {
       // The directory voice reads a caller's Membership from.
       CORE_INTERNAL_URL: where.core,
       CORE_INTERNAL_TOKEN: secrets.voiceCoreToken,
+      // Core's secret for voice's internal routes.
+      INTERNAL_API_TOKENS: secrets.coreVoiceToken,
       // Where voice reads an Organization's Playbook evidence from; it sends its own secret.
       PLAYBOOK_INTERNAL_URL: where.playbook,
       PLAYBOOK_INTERNAL_TOKEN: secrets.voicePlaybookToken,
