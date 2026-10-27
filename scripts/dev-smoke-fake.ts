@@ -1,4 +1,5 @@
 import { createPlaybookFake, type PlaybookFakeOptions } from './dev-smoke-playbook-fake.ts'
+import { createVoiceFake, type VoiceFakeOptions } from './dev-smoke-voice-fake.ts'
 
 // A stand-in for auth, core, the playbook, the portal and the Mailpit API, used only by the smoke test's own
 // tests. It behaves like the real services for the calls the smoke test makes (codes in a mailbox,
@@ -80,6 +81,8 @@ export type FakeOptions = {
   /** Creating an Invitation answers 200, or says its state is something other than pending. */
   createInvitationAs200?: boolean
   invitationNotPending?: boolean
+  /** The queued bulk assignment is accepted (202) but never applied: no worker reads the queue. */
+  assignNeverApplied?: boolean
   /** The error code of a refused replay, and of the newest token after the reuse. */
   replayCode?: string
   newestCode?: string
@@ -92,6 +95,8 @@ export type FakeOptions = {
   trustOrganizationHeader?: boolean
   /** What is broken in the playbook: see dev-smoke-playbook-fake.ts. */
   playbook?: PlaybookFakeOptions
+  /** What is broken in voice: see dev-smoke-voice-fake.ts. */
+  voice?: VoiceFakeOptions
   /**
    * Sign in with Google. `off`: auth-options says Google is off. `real`: the authorization URL is
    * on accounts.google.com. The rest break one thing: a callback that can be replayed, a returning
@@ -116,8 +121,17 @@ export function fakeStack(options: FakeOptions = {}) {
   const users = new Map<string, { password: string; orgId: string; userId: string }>()
   const attempts = new Map<
     string,
-    { email: string; secret: string; code: string; password: string; name: string }
+    {
+      email: string
+      secret: string
+      code: string
+      password: string
+      name: string
+      invitationToken?: string
+    }
   >()
+  const invitationTokens = new Map<string, { orgId: string; role: string }>()
+  const prospects = new Map<string, { orgId: string; ownerMembershipId: string }>()
   const tokens = new Map<string, { sid: string; userId: string; usedAt?: number; child?: string }>()
   const revokedSessions = new Set<string>()
   const sessions = new Map<string, { orgId: string; userId: string }>()
@@ -218,6 +232,9 @@ export function fakeStack(options: FakeOptions = {}) {
         code,
         password: String(body.password),
         name: String(body.organizationName),
+        ...(typeof body.invitationToken === 'string'
+          ? { invitationToken: body.invitationToken }
+          : {}),
       })
       if (!options.dropMail) {
         const line =
@@ -247,10 +264,18 @@ export function fakeStack(options: FakeOptions = {}) {
         return error(422, 'verification.code_invalid')
       }
       const userId = next('usr')
-      const orgId = next('org')
+      const invited = attempt.invitationToken
+        ? invitationTokens.get(attempt.invitationToken)
+        : undefined
+      if (attempt.invitationToken && !invited) {
+        return error(404, 'invitation.not_found')
+      }
+      const orgId = invited?.orgId ?? next('org')
       users.set(attempt.email, { password: attempt.password, orgId, userId })
-      orgs.set(orgId, attempt.name)
-      members.push({ id: next('mem'), userId, orgId, role: 'owner' })
+      if (!invited) {
+        orgs.set(orgId, attempt.name)
+      }
+      members.push({ id: next('mem'), userId, orgId, role: invited?.role ?? 'owner' })
       return json({ id: verify[1], step: { status: 'complete' } })
     }
     if (path === '/v1/client/sign-ins' && request.method === 'POST') {
@@ -436,7 +461,24 @@ export function fakeStack(options: FakeOptions = {}) {
     return undefined
   }
 
+  const demoRequests = new Map<string, { id: string; body: string }>()
   const core = async (request: Request, url: URL, body: Record<string, unknown>) => {
+    if (url.pathname === '/v1/marketing/demo-requests' && request.method === 'POST') {
+      const key = request.headers.get('idempotency-key') ?? ''
+      if (key.length < 16 || typeof body.workEmail !== 'string' || !body.workEmail.includes('@')) {
+        return error(400, 'marketing.invalid_request')
+      }
+      const seen = demoRequests.get(key)
+      if (seen) {
+        return seen.body === JSON.stringify(body)
+          ? json({ id: seen.id }, 200)
+          : error(422, 'request.idempotency_key_reused')
+      }
+      const id = `dreq_${crypto.randomUUID().replaceAll('-', '')}`
+      demoRequests.set(key, { id, body: JSON.stringify(body) })
+      addMail('team@closeline.test', `Demo Request from ${String(body.companyName)}`, id)
+      return json({ id }, 201)
+    }
     const header = request.headers.get('authorization')
     const session = header ? sessions.get(header.replace(/^Bearer /, '')) : undefined
     if (options.coreOpen && url.pathname === '/v1/organization') {
@@ -506,8 +548,11 @@ export function fakeStack(options: FakeOptions = {}) {
       invitations.push({ id, orgId, email: String(body.email), state: 'pending' })
       if (!options.dropMail) {
         const host = options.wrongLinkHost ? 'https://elsewhere.invalid' : origins.portal
-        const token = () =>
-          `${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().slice(0, 8)}`
+        const token = () => {
+          const value = `${crypto.randomUUID().replaceAll('-', '')}${crypto.randomUUID().slice(0, 8)}`
+          invitationTokens.set(value, { orgId, role: String(body.role) })
+          return value
+        }
         const link = `${host}/sign-up#invitation=${token()}`
         const links =
           options.links === 'two'
@@ -530,6 +575,43 @@ export function fakeStack(options: FakeOptions = {}) {
         },
         options.createInvitationAs200 ? 200 : 201
       )
+    }
+    if (pathname === '/v1/prospects' && method === 'POST') {
+      const owner = members.find((m) => m.orgId === orgId && m.role === 'owner')
+      const id = `prs_${crypto.randomUUID().replaceAll('-', '')}`
+      prospects.set(id, { orgId, ownerMembershipId: owner?.id ?? '' })
+      return json({ id, ownerMembershipId: owner?.id ?? null }, 201)
+    }
+    const prospect = /^\/v1\/prospects\/([^/]+)$/.exec(pathname)
+    if (prospect && method === 'GET') {
+      const found = prospects.get(prospect[1] ?? '')
+      if (!found || found.orgId !== orgId) {
+        return error(404, 'prospect.not_found')
+      }
+      return json({ id: prospect[1], ownerMembershipId: found.ownerMembershipId })
+    }
+    if (pathname === '/v1/prospects/assign' && method === 'POST') {
+      const ids = Array.isArray(body.prospectIds) ? body.prospectIds.map(String) : []
+      const rep = members.find(
+        (m) => m.id === body.ownerMembershipId && m.orgId === orgId && m.role === 'rep'
+      )
+      if (!rep) {
+        return error(403, 'prospect.forbidden_owner')
+      }
+      if (ids.length <= 500) {
+        return json({ state: 'applied', requested: ids.length, assigned: 0, skipped: 0 })
+      }
+      if (!options.assignNeverApplied) {
+        setTimeout(() => {
+          for (const id of ids) {
+            const found = prospects.get(id)
+            if (found && found.orgId === orgId) {
+              found.ownerMembershipId = rep.id
+            }
+          }
+        }, 50)
+      }
+      return json({ state: 'queued', requested: ids.length, assigned: null, skipped: null }, 202)
     }
     if (pathname === '/v1/invitations' && method === 'GET') {
       const rows =
@@ -677,6 +759,22 @@ export function fakeStack(options: FakeOptions = {}) {
     },
   })
 
+  const voiceHandler = createVoiceFake((token) => sessions.get(token)?.orgId, options.voice)
+  const voiceServer = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch: async (request) => {
+      const url = new URL(request.url)
+      seen.push({
+        method: request.method,
+        path: url.pathname,
+        body: await request.clone().text(),
+        key: request.headers.get('idempotency-key'),
+      })
+      return voiceHandler(request)
+    },
+  })
+
   const serve = (which: 'auth' | 'core' | 'portal' | 'mail') =>
     Bun.serve({
       port: 0,
@@ -761,6 +859,7 @@ export function fakeStack(options: FakeOptions = {}) {
     portal: serve('portal'),
     mail: serve('mail'),
     playbook: playbookServer,
+    voice: voiceServer,
   }
   const origin = (name: keyof typeof servers) => `http://127.0.0.1:${servers[name].port}`
   origins.portal = origin('portal')
@@ -780,6 +879,7 @@ export function fakeStack(options: FakeOptions = {}) {
       auth: origin('auth'),
       core: origin('core'),
       playbook: origin('playbook'),
+      voice: origin('voice'),
       portal: origin('portal'),
       mail: origin('mail'),
     },

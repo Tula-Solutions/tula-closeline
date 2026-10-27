@@ -8,6 +8,7 @@ import {
   runSmoke,
   SALES_HISTORY_STEPS,
   type StepResult,
+  VOICE_STEPS,
 } from './dev-smoke.ts'
 import { type FakeOptions, fakeStack } from './dev-smoke-fake.ts'
 
@@ -47,7 +48,7 @@ describe('runSmoke against a healthy stack', () => {
 
   test('each sign-up is sent once and a refresh token is used once, except the deliberate replay', async () => {
     const { stack } = await run()
-    expect(stack.seen.filter((call) => call.path === '/v1/client/sign-ups')).toHaveLength(3)
+    expect(stack.seen.filter((call) => call.path === '/v1/client/sign-ups')).toHaveLength(4)
     const refreshes = stack.seen
       .filter((call) => call.path === '/v1/client/sessions/refresh')
       .map((call) => call.body)
@@ -55,7 +56,7 @@ describe('runSmoke against a healthy stack', () => {
     expect(refreshes.length - new Set(refreshes).size).toBe(1)
     expect(
       stack.seen.filter((call) => call.path === '/v1/invitations' && call.method === 'POST')
-    ).toHaveLength(2)
+    ).toHaveLength(3)
   })
 
   test('the sign-up uses a reserved .test domain and a fresh address each run', async () => {
@@ -100,7 +101,7 @@ describe('runSmoke without a mailbox for auth', () => {
     expect(signUp?.status).toBe('skip')
     expect(signUp?.detail).toContain('mail.unavailable')
     expect(results.filter((result) => result.status === 'skip')).toHaveLength(
-      ACCOUNT_STEPS.length + SALES_HISTORY_STEPS.length
+      ACCOUNT_STEPS.length + SALES_HISTORY_STEPS.length + VOICE_STEPS.length
     )
     const verify = by(results, 'verify the email code')
     expect(verify?.status).toBe('skip')
@@ -148,6 +149,22 @@ describe('refresh through the portal', () => {
     expect(step?.detail).toContain('auth.forbidden')
     expect(by(results, 'refresh the session')?.status).toBe('pass')
     expect(exitCodeFor(results)).toBe(1)
+  })
+})
+
+describe('core jobs queue step', () => {
+  const JOBS = 'core: a bulk assignment of more than 500 Prospects is queued and completes'
+
+  test('a queued assignment that is never applied fails with a hint about JOBS_QUEUE_URL', async () => {
+    const { results } = await run(
+      { assignNeverApplied: true },
+      { jobsWaitMs: 300, jobsIntervalMs: 50 }
+    )
+    {
+      const step = by(results, JOBS)
+      expect(step?.status).toBe('fail')
+      expect(step?.detail).toContain('JOBS_QUEUE_URL')
+    }
   })
 })
 
@@ -240,7 +257,7 @@ describe('Organization isolation', () => {
     const { stack } = await run()
     const signUps = stack.seen.filter((call) => call.path === '/v1/client/sign-ups')
     const emails = signUps.map((call) => (JSON.parse(call.body) as { email: string }).email)
-    expect(new Set(emails).size).toBe(3)
+    expect(new Set(emails).size).toBe(4)
   })
 })
 

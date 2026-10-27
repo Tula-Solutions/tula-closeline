@@ -20,7 +20,7 @@ import { FAKE_GOOGLE_CLIENT_ID, FAKE_GOOGLE_CLIENT_SECRET } from './dev-fake-goo
 export const COMPOSE_PROJECT = 'closeline-dev'
 
 /** The sibling clones the stack runs from, by short name. */
-export const SIBLINGS = ['db', 'auth', 'core', 'playbook', 'portal'] as const
+export const SIBLINGS = ['db', 'auth', 'core', 'playbook', 'voice', 'outbound', 'portal'] as const
 
 /** The short name of a sibling clone (`tula-closeline-<short>`). */
 export type Sibling = (typeof SIBLINGS)[number]
@@ -34,6 +34,8 @@ export type Ports = {
   auth: number
   core: number
   playbook: number
+  voice: number
+  outbound: number
   portal: number
   /** The fake Google OpenID provider (loopback only), used when no real Google is configured. */
   fakeGoogle: number
@@ -48,6 +50,8 @@ export const DEFAULT_PORTS: Ports = {
   auth: 3001,
   core: 3100,
   playbook: 3003,
+  voice: 3004,
+  outbound: 3005,
   portal: 3002,
   fakeGoogle: 3010,
 }
@@ -60,6 +64,8 @@ const PORT_VARIABLES: Record<keyof Ports, string> = {
   auth: 'CLOSELINE_DEV_AUTH_PORT',
   core: 'CLOSELINE_DEV_CORE_PORT',
   playbook: 'CLOSELINE_DEV_PLAYBOOK_PORT',
+  voice: 'CLOSELINE_DEV_VOICE_PORT',
+  outbound: 'CLOSELINE_DEV_OUTBOUND_PORT',
   portal: 'CLOSELINE_DEV_PORTAL_PORT',
   fakeGoogle: 'CLOSELINE_DEV_FAKE_GOOGLE_PORT',
 }
@@ -138,6 +144,8 @@ export const ROLES = [
   'closeline_auth',
   'closeline_core',
   'closeline_playbook',
+  'closeline_voice',
+  'closeline_outbound',
 ] as const
 
 /** One of the roles in {@link ROLES}. */
@@ -150,6 +158,12 @@ export type Secrets = {
   internalToken: string
   /** The bearer secret the playbook accepts on its internal routes. */
   playbookToken: string
+  /** The bearer secret voice presents to core's internal directory; core lists it beside auth's. */
+  voiceCoreToken: string
+  /** The bearer secret outbound presents to core's internal Prospect routes; core lists it too. */
+  outboundCoreToken: string
+  /** The key core signs and checks unsubscribe tokens with. */
+  unsubscribeTokenKey: string
 }
 
 /** Fresh secrets from a cryptographically secure generator (32 random bytes each). */
@@ -162,12 +176,22 @@ export function generateSecrets(random: (size: number) => Buffer = randomBytes):
     passwords,
     internalToken: randomHex(32, random),
     playbookToken: randomHex(32, random),
+    voiceCoreToken: randomHex(32, random),
+    outboundCoreToken: randomHex(32, random),
+    unsubscribeTokenKey: randomHex(32, random),
   }
 }
 
 /** Every secret value, for {@link redact}. */
 export function secretValues(secrets: Secrets): string[] {
-  return [...Object.values(secrets.passwords), secrets.internalToken, secrets.playbookToken]
+  return [
+    ...Object.values(secrets.passwords),
+    secrets.internalToken,
+    secrets.playbookToken,
+    secrets.voiceCoreToken,
+    secrets.outboundCoreToken,
+    secrets.unsubscribeTokenKey,
+  ]
 }
 
 const SCRAM_ITERATIONS = 4096
@@ -206,6 +230,59 @@ export function rotationSql(secrets: Secrets, salt: () => Buffer): string {
 /** A fresh 16-byte salt from the secure generator, one per role per run. */
 export function freshSalt(): Buffer {
   return randomBytes(16)
+}
+
+/**
+ * The NOLOGIN roles of `tula-closeline-db/docker/postgres/init.sql`, with the attributes it gives
+ * them. That file runs only when the dev volume is first created, so a volume made before a
+ * migration needed a new role would fail to migrate: {@link ensureRolesSql} creates the missing
+ * ones on every start. A test compares this list with the db clone's init.sql.
+ */
+export const NOLOGIN_ROLES: readonly { name: string; attributes: string }[] = [
+  {
+    name: 'closeline_core_search',
+    attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
+  },
+  {
+    name: 'closeline_core_crm_lookup',
+    attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
+  },
+  {
+    name: 'closeline_core_key_lookup',
+    attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
+  },
+  {
+    name: 'closeline_core_outbox_drain',
+    attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
+  },
+  {
+    name: 'closeline_voice_purge_scan',
+    attributes: 'NOSUPERUSER NOCREATEROLE NOCREATEDB NOINHERIT BYPASSRLS',
+  },
+]
+
+/**
+ * Login roles the db clone's init.sql does not create (yet), made here without a password: the
+ * rotation gives each one its password on every start. Created only when missing.
+ */
+export const EXTRA_LOGIN_ROLES: readonly string[] = ['closeline_outbound']
+
+/**
+ * Idempotent SQL that creates each of {@link NOLOGIN_ROLES} when it is missing and grants it to the
+ * owner role (`SET` only, no inheritance). Never touches a login role or a password; run as the
+ * superuser before the migrations.
+ */
+export function ensureRolesSql(): string {
+  return `${NOLOGIN_ROLES.map(
+    ({ name, attributes }) =>
+      `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${name}') THEN ` +
+      `CREATE ROLE ${name} NOLOGIN ${attributes}; END IF; END $$;\n` +
+      `GRANT ${name} TO closeline_owner WITH SET TRUE, INHERIT FALSE;`
+  ).join('\n')}\n${EXTRA_LOGIN_ROLES.map(
+    (name) =>
+      `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${name}') THEN ` +
+      `CREATE ROLE ${name} LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB; END IF; END $$;\n`
+  ).join('')}`
 }
 
 /** The query `dev.ts` runs to list every role that can log in. */
@@ -315,6 +392,12 @@ export function baseChildEnv(parent: Record<string, string | undefined>): Record
 /** The queue the playbook reads, defined in `scripts/dev/elasticmq.conf`. */
 export const PLAYBOOK_QUEUE = 'closeline-playbook'
 
+/** The queue core reads its background jobs from, defined in `scripts/dev/elasticmq.conf`. */
+export const CORE_JOBS_QUEUE = 'core-jobs'
+
+/** The queue core publishes `audit.recorded` events to, defined in `scripts/dev/elasticmq.conf`. */
+export const CORE_AUDIT_QUEUE = 'core-audit'
+
 /** The bucket the object storage stand-in creates (`compose.dev.yaml`). */
 export const STORAGE_BUCKET = 'closeline-dev'
 
@@ -360,6 +443,8 @@ export function origins(ports: Ports): {
   auth: string
   core: string
   playbook: string
+  voice: string
+  outbound: string
   portal: string
   mail: string
   fakeGoogle: string
@@ -369,6 +454,8 @@ export function origins(ports: Ports): {
     auth: `http://127.0.0.1:${ports.auth}`,
     core: `http://127.0.0.1:${ports.core}`,
     playbook: `http://127.0.0.1:${ports.playbook}`,
+    voice: `http://127.0.0.1:${ports.voice}`,
+    outbound: `http://127.0.0.1:${ports.outbound}`,
     portal: `http://127.0.0.1:${ports.portal}`,
     fakeGoogle: `http://127.0.0.1:${ports.fakeGoogle}`,
   }
@@ -436,6 +523,8 @@ export type StackEnv = {
   auth: Record<string, string>
   core: Record<string, string>
   playbook: Record<string, string>
+  voice: Record<string, string>
+  outbound: Record<string, string>
   portal: Record<string, string>
   /** The fake Google provider's process; undefined when real Google settings are in use. */
   fakeGoogle: Record<string, string> | undefined
@@ -457,6 +546,8 @@ export function buildStackEnv(options: {
   dbDir: string
   /** Where the database is reached; only a loopback address is accepted. */
   databaseHost?: string
+  /** The text of `scripts/dev/elasticmq.conf`; its hash makes compose recreate a stale queue. */
+  queueConfig?: string
 }): StackEnv {
   const { parent, ports, secrets, dbDir } = options
   const host = options.databaseHost ?? '127.0.0.1'
@@ -486,6 +577,15 @@ export function buildStackEnv(options: {
       CLOSELINE_DEV_QUEUE_PORT: String(ports.queue),
       CLOSELINE_DEV_STORAGE_PORT: String(ports.storage),
       CLOSELINE_DEV_MAIL_PORT: String(ports.mail),
+      // A bind-mounted file is not part of the service definition, so compose would keep a queue
+      // started from an older config. The hash, a label on the service, makes the change visible.
+      ...(options.queueConfig === undefined
+        ? {}
+        : {
+            CLOSELINE_DEV_QUEUE_CONFIG_SHA: createHash('sha256')
+              .update(options.queueConfig)
+              .digest('hex'),
+          }),
     },
     migrate: { ...base, DATABASE_URL: databaseUrl('closeline_owner', secrets, ports, host) },
     auth: {
@@ -524,9 +624,19 @@ export function buildStackEnv(options: {
       AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
       AUTH_ISSUER: where.auth,
       AUTH_AUDIENCE: 'closeline',
-      INTERNAL_API_TOKENS: secrets.internalToken,
+      // Auth's, voice's and outbound's secrets, comma separated (core accepts several).
+      INTERNAL_API_TOKENS: `${secrets.internalToken},${secrets.voiceCoreToken},${secrets.outboundCoreToken}`,
       PORTAL_BASE_URL: where.portal,
       MAIL_LOCAL_URL: where.mail,
+      UNSUBSCRIBE_TOKEN_KEY: secrets.unsubscribeTokenKey,
+      // The queue stand-in of the compose file; it ignores the credentials, but the AWS SDK will
+      // not sign a request without some.
+      AWS_REGION: 'us-east-1',
+      AWS_ACCESS_KEY_ID: 'local',
+      AWS_SECRET_ACCESS_KEY: 'local',
+      JOBS_QUEUE_URL: `http://127.0.0.1:${ports.queue}/000000000000/${CORE_JOBS_QUEUE}`,
+      AUDIT_QUEUE_URL: `http://127.0.0.1:${ports.queue}/000000000000/${CORE_AUDIT_QUEUE}`,
+      QUEUE_ENDPOINT: `http://127.0.0.1:${ports.queue}`,
     },
     playbook: {
       ...base,
@@ -550,6 +660,28 @@ export function buildStackEnv(options: {
       INGESTION_POLL_INTERVAL_MS: '1000',
       TRANSCRIBE_POLL_INTERVAL_MS: '1000',
     },
+    voice: {
+      ...base,
+      ...common,
+      PORT: String(ports.voice),
+      DATABASE_URL: databaseUrl('closeline_voice', secrets, ports, host),
+      AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
+      AUTH_ISSUER: where.auth,
+      AUTH_AUDIENCE: 'closeline',
+      // The directory voice reads a caller's Membership from.
+      CORE_INTERNAL_URL: where.core,
+      CORE_INTERNAL_TOKEN: secrets.voiceCoreToken,
+      // The in-process stand-in: no real telephony provider is ever called from a dev stack.
+      TELEPHONY_PROVIDER: 'memory',
+    },
+    outbound: {
+      ...base,
+      ...common,
+      PORT: String(ports.outbound),
+      // Where the enrichment waterfall reads a Prospect and writes enriched fields back.
+      CORE_URL: where.core,
+      CORE_INTERNAL_SECRET: secrets.outboundCoreToken,
+    },
     portal: {
       ...base,
       VITE_ENVIRONMENT: 'local',
@@ -557,10 +689,9 @@ export function buildStackEnv(options: {
       AUTH_PROXY_TARGET: where.auth,
       CORE_PROXY_TARGET: where.core,
       PLAYBOOK_PROXY_TARGET: where.playbook,
-      // Vite blocks an unknown Host header. This variable is Vite-internal and undocumented,
-      // checked against Vite 8.3.4; if a Vite release drops it the tunnel fails as "Blocked
-      // request". The portal should later read its own env var into `server.allowedHosts`.
-      ...(publicOrigin ? { __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: publicOrigin.host } : {}),
+      VOICE_PROXY_TARGET: where.voice,
+      // Vite blocks an unknown Host header; the portal reads this setting into `server.allowedHosts`.
+      ...(publicOrigin ? { PORTAL_DEV_ALLOWED_HOSTS: publicOrigin.host } : {}),
       // The portal lets the browser follow a redirect to this host only (the fake provider).
       ...(google.kind === 'fake'
         ? { VITE_GOOGLE_FAKE_ISSUER_HOST: `127.0.0.1:${ports.fakeGoogle}` }
@@ -712,12 +843,15 @@ export function checkSiblings(root: string, needed: readonly Sibling[] = SIBLING
 
 /** What the stack runs besides the compose services, in start order. */
 export type ServiceDefinition = {
-  name: 'fake-google' | 'auth' | 'core' | 'playbook' | 'portal'
+  name: 'fake-google' | 'auth' | 'core' | 'playbook' | 'voice' | 'outbound' | 'portal'
   /** The clone it runs from; undefined means the hub itself. */
   sibling?: Sibling
   /** The command, run from the clone. `--no-env-file` keeps a stray `.env` out of the process. */
   cmd: string[]
-  env: keyof Pick<StackEnv, 'fakeGoogle' | 'auth' | 'core' | 'playbook' | 'portal'>
+  env: keyof Pick<
+    StackEnv,
+    'fakeGoogle' | 'auth' | 'core' | 'playbook' | 'voice' | 'outbound' | 'portal'
+  >
   /** The URL that answers 2xx when the service is ready. */
   readyUrl: string
 }
@@ -765,6 +899,22 @@ export function serviceDefinitions(
       cmd: [bun, '--no-env-file', 'src/server.ts'],
       env: 'playbook',
       readyUrl: `${where.playbook}/readyz`,
+    },
+    {
+      // Lines and Calls; the number provider is its in-memory stand-in (TELEPHONY_PROVIDER=memory).
+      name: 'voice',
+      sibling: 'voice',
+      cmd: [bun, '--no-env-file', 'src/server.ts'],
+      env: 'voice',
+      readyUrl: `${where.voice}/readyz`,
+    },
+    {
+      // Campaigns across email, LinkedIn and messaging; only its health routes exist so far.
+      name: 'outbound',
+      sibling: 'outbound',
+      cmd: [bun, '--no-env-file', 'src/server.ts'],
+      env: 'outbound',
+      readyUrl: `${where.outbound}/readyz`,
     },
     {
       name: 'portal',

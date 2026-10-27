@@ -1,0 +1,9 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "description": "The routes an Organization API key may call. Exchange the key for a short-lived token at the auth service, then send it as a bearer token.",
+    "title": "Closeline public API",
+    "version": "1.0.0"
+  },
+  "paths": {}
+}

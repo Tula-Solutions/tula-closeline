@@ -55,7 +55,7 @@ jobs:
           done
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
       # The portal declares libraries as git+ssh URLs and the runner has no SSH key. The repos are
       # public, so plain https works (the same rewrite as verify.yml, minus the private-repo token).
       - name: Fetch tula-closeline-* dependencies over https

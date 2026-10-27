@@ -8,6 +8,7 @@ import {
   composeArgs,
   dockerEndpointProblem,
   downArgs,
+  ensureRolesSql,
   type HolderOutcome,
   LOGIN_ROLES_SQL,
   type ManagedChild,
@@ -101,7 +102,7 @@ async function prepare(
       secrets: deps.secrets,
       dbDir: siblingDir(ctx.root, 'db'),
     })
-    for (const env of [stack.migrate, stack.auth, stack.core, stack.playbook]) {
+    for (const env of [stack.migrate, stack.auth, stack.core, stack.playbook, stack.voice]) {
       assertLoopbackDatabaseUrl(env.DATABASE_URL ?? '')
     }
   } catch (error) {
@@ -289,6 +290,8 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       { name: 'auth', port: ports.auth },
       { name: 'core', port: ports.core },
       { name: 'playbook', port: ports.playbook },
+      { name: 'voice', port: ports.voice },
+      { name: 'outbound', port: ports.outbound },
       { name: 'portal', port: ports.portal },
       ...(stack.fakeGoogle ? [{ name: 'fake Google', port: ports.fakeGoogle }] : []),
       ...notRunning,
@@ -380,6 +383,23 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       return 1
     }
 
+    deps.say('creating any database role that the volume was made without')
+    if (
+      !(await step(
+        'compose',
+        psql,
+        {
+          cwd: ctx.hub,
+          env: stack.compose,
+          stdin: ensureRolesSql(),
+          timeoutMs: TIMEOUTS.psql,
+        },
+        'could not create the NOLOGIN database roles'
+      ))
+    ) {
+      return failed()
+    }
+
     deps.say('replacing every database login role password with a new random one')
     if (
       !(await step(
@@ -432,6 +452,10 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
         deps.say(`auth    ${where.auth}`)
         deps.say(`core    ${where.core}`)
         deps.say(`playbook ${where.playbook}  (API and workers in one process)`)
+        deps.say(
+          `voice   ${where.voice}  (Lines; numbers come from an in-memory stand-in, never Twilio)`
+        )
+        deps.say(`outbound ${where.outbound}  (health routes only so far)`)
         deps.say(`portal  ${where.portal}`)
         deps.say(
           stack.fakeGoogle

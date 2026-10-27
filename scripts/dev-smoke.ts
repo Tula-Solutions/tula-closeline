@@ -20,6 +20,7 @@ export type SmokeTargets = {
   auth: string
   core: string
   playbook: string
+  voice: string
   portal: string
   mail: string
   /** The fake Google provider; without it the Google steps cannot tell the fake from real Google. */
@@ -35,6 +36,10 @@ export type SmokeOptions = {
   mailWaitMs?: number
   /** Pause between looks at the mailbox. */
   mailIntervalMs?: number
+  /** Longest to wait for core's job queue to finish a queued bulk assignment. */
+  jobsWaitMs?: number
+  /** Pause between looks at a queued bulk assignment. */
+  jobsIntervalMs?: number
   /** Longest to wait for a Call or a Deal import to be processed. */
   playbookWaitMs?: number
   /** Pause between looks at a Call or a Deal import. */
@@ -42,6 +47,9 @@ export type SmokeOptions = {
 }
 
 const MAX_BODY_CHARS = 65_536
+
+/** Where core's local default for DEMO_NOTICE_TO sends the Demo Request team notice. */
+const DEMO_NOTICE_TO = 'team@closeline.test'
 
 type Outcome = { status: StepStatus; detail: string }
 type Json = Record<string, unknown>
@@ -59,6 +67,7 @@ export const ACCOUNT_STEPS = [
   'create an Invitation',
   'the Invitation email and its link reach the mailbox',
   'create a Team',
+  'core: a bulk assignment of more than 500 Prospects is queued and completes',
   'a second sign-up cannot read the first Organization',
   'a replayed refresh token is refused and ends its session',
 ] as const
@@ -76,6 +85,12 @@ export const SALES_HISTORY_STEPS = [
   'the Outcome reaches the Moments and the Call is in search',
   'a second Organization cannot see any of the sales history',
   'delete the Call and it is gone',
+] as const
+
+/** The names of the Lines steps (voice), in the order they run after the sales-history steps. */
+export const VOICE_STEPS = [
+  'voice: an Owner adds a Line and lists it',
+  'voice: a second Organization sees none of the first Lines',
 ] as const
 
 /** Bytes of a one-second, 8 kHz, mono, 16-bit PCM WAV of silence: the smallest real Recording. */
@@ -184,6 +199,9 @@ type State = {
   recording?: { id: string }
   dealImport?: { id: string }
   hidden?: true
+  /** The second Organization's sign-in, made by the sales-history check. */
+  second?: { email: string; password: string }
+  line?: { id: string }
 }
 
 /**
@@ -343,8 +361,65 @@ export async function runSmoke(
         )
   })
 
+  await step(
+    'core: a Demo Request is accepted, replayed, and its team notice is mailed',
+    async () => {
+      // Public route, no token. The team notice goes to the local default of DEMO_NOTICE_TO.
+      remember(DEMO_NOTICE_TO)
+      const company = minted(`Smoke-${crypto.randomUUID().slice(0, 8)}`)
+      const key = minted(`smoke-${crypto.randomUUID()}`)
+      const body = {
+        name: 'Smoke Visitor',
+        workEmail: 'smoke.visitor@example.test',
+        companyName: company,
+        message: 'Sent by dev:smoke.',
+        sourcePage: '/smoke',
+      }
+      const url = `${targets.core}/v1/marketing/demo-requests`
+      const headers = { 'idempotency-key': key }
+      const first = await call('POST', url, { headers, body })
+      if (first.status === 429) {
+        return skip(
+          'the per-address rate limit is spent (10 an hour); wait, or stop the stack with --down --volumes'
+        )
+      }
+      const id = text(pick(first.json, 'id'))
+      if (first.status !== 201 || id === undefined) {
+        return fail(`POST answered ${first.status} ${errorCode(first.json) ?? ''}`.trim())
+      }
+      const replay = await call('POST', url, { headers, body })
+      if (replay.status !== 200 || text(pick(replay.json, 'id')) !== id) {
+        return fail(`the same key and body answered ${replay.status}, not 200 with the first id`)
+      }
+      const mailed = await mailbox(DEMO_NOTICE_TO, `Demo Request from ${company}`)
+      if (!mailed.ok) {
+        return unread(mailed, 'Demo Request team notice')
+      }
+      return mailed.text.includes(id) ? pass() : fail('the team notice does not name the request')
+    }
+  )
+
+  await step('core: a Demo Request with a bad body is marketing.invalid_request', async () => {
+    const response = await call('POST', `${targets.core}/v1/marketing/demo-requests`, {
+      headers: { 'idempotency-key': minted(`smoke-${crypto.randomUUID()}`) },
+      body: { name: minted('Bad Visitor'), workEmail: minted('not-an-email') },
+    })
+    if (response.status === 429) {
+      return skip('the per-address rate limit is spent (10 an hour)')
+    }
+    return response.status === 400 && errorCode(response.json) === 'marketing.invalid_request'
+      ? pass()
+      : fail(`answered ${response.status} ${errorCode(response.json) ?? ''}`.trim())
+  })
+
   await step('playbook is ready', async () => {
     const response = await request(`${targets.playbook}/readyz`)
+    await response.body?.cancel()
+    return response.status === 200 ? pass() : fail(`GET /readyz answered ${response.status}`)
+  })
+
+  await step('voice is ready', async () => {
+    const response = await request(`${targets.voice}/readyz`)
     await response.body?.cancel()
     return response.status === 200 ? pass() : fail(`GET /readyz answered ${response.status}`)
   })
@@ -417,11 +492,19 @@ export async function runSmoke(
   }
 
   /** Starts a sign-up for `email`; the attempt, or a reason it did not start. */
-  const startSignUp = async (email: string, password: string, organizationName: string) => {
+  const startSignUp = async (
+    email: string,
+    password: string,
+    organizationName: string,
+    invitationToken?: string
+  ) => {
     remember(email, password)
     const found = await call('POST', `${targets.auth}/v1/client/sign-ups`, {
       headers: client,
-      body: { email, password, organizationName },
+      body:
+        invitationToken === undefined
+          ? { email, password, organizationName }
+          : { email, password, invitationToken },
       once: true,
     })
     const id = text(pick(found.json, 'id'))
@@ -719,6 +802,145 @@ export async function runSmoke(
     remember(id)
     return pass()
   })
+
+  // Core's jobs queue: more than 500 ids are applied in the background by core's worker, from the
+  // queue. The queued answer carries no counts and there is no job-status route, so completion is
+  // seen on a Prospect: its owner becomes the invited Rep. Uses its own Invitation, so the later
+  // isolation step is unaffected.
+  await flow(
+    'core: a bulk assignment of more than 500 Prospects is queued and completes',
+    ['session'],
+    [],
+    async () => {
+      const core = (path: string) => `${targets.core}${path}`
+      const answered = (response: { status: number; json: unknown }) =>
+        `${response.status} ${errorCode(response.json) ?? ''}`.trim()
+      const ownerIn = await signIn(email, password)
+      if ('error' in ownerIn) {
+        return fail(ownerIn.error ?? 'the Owner sign-in failed')
+      }
+      const ownerOrganizationId = ownerIn.session.organizationId
+      let ownerSession = ownerIn.session
+      let signedAt = Date.now()
+
+      // 1. A Rep joins the Organization through an Invitation: only a Rep or Manager can be the
+      //    new owner of a Prospect.
+      const repEmail = minted(`rep-${runId}@closeline-smoke.test`)
+      const repPassword = minted(`${randomHex(16)}-Aa1`)
+      const invited = await call('POST', core('/v1/invitations'), {
+        headers: { ...authed(ownerSession), 'idempotency-key': `smoke-${runId}-rep-invite` },
+        body: { email: repEmail, role: 'rep' },
+        once: true,
+      })
+      if (invited.status !== 201) {
+        return fail(`POST /v1/invitations answered ${answered(invited)} for the Rep`)
+      }
+      const inviteMail = await mailbox(repEmail, 'invited')
+      if (!inviteMail.ok) {
+        return unread(inviteMail, 'Rep Invitation')
+      }
+      const token = (inviteMail.text.match(/#invitation=([A-Za-z0-9_-]{22,256})/) ?? [])[1]
+      if (token === undefined) {
+        return fail('the Rep Invitation email has no accept link')
+      }
+      remember(token)
+      const started = await startSignUp(repEmail, repPassword, '', token)
+      if (started.status !== 200 || !started.id || !started.secret) {
+        return fail(`the Rep sign-up answered ${started.status} ${started.code ?? ''}`.trim())
+      }
+      const codeMail = await mailbox(repEmail, 'verification code')
+      if (!codeMail.ok) {
+        return unread(codeMail, 'Rep verification')
+      }
+      const found = codeIn(codeMail.text)
+      if ('problem' in found) {
+        return fail(`the Rep sign-up: ${found.problem}`)
+      }
+      remember(found.code)
+      const verified = await verify({ id: started.id, secret: started.secret }, found.code)
+      if (verified.status !== 200) {
+        return fail(`the Rep verify answered ${verified.status} ${verified.code ?? ''}`.trim())
+      }
+      const repIn = await signIn(repEmail, repPassword)
+      if ('error' in repIn) {
+        return fail(repIn.error ?? 'the Rep sign-in failed')
+      }
+      if (repIn.session.organizationId !== ownerOrganizationId) {
+        return fail('the invited Rep was not put into the Organization of the Owner')
+      }
+      const members = await call('GET', core('/v1/members'), { headers: authed(ownerSession) })
+      const rows = pick(members.json, 'items')
+      const rep = Array.isArray(rows) ? rows.find((row) => pick(row, 'role') === 'rep') : undefined
+      const repMembershipId = text(pick(rep, 'id'))
+      if (members.status !== 200 || !repMembershipId) {
+        return fail(`GET /v1/members shows no Rep (${answered(members)})`)
+      }
+      remember(repMembershipId)
+
+      // 2. One real Prospect, owned by the Owner.
+      const created = await call('POST', core('/v1/prospects'), {
+        headers: { ...authed(ownerSession), 'idempotency-key': `smoke-${runId}-prospect` },
+        body: {
+          firstName: 'Smoke',
+          lastName: `Jobs ${runId}`,
+          email: minted(`prospect-${runId}@closeline-smoke.test`),
+        },
+        once: true,
+      })
+      const prospectId = text(pick(created.json, 'id'))
+      if (created.status !== 201 || !prospectId) {
+        return fail(`POST /v1/prospects answered ${answered(created)}`)
+      }
+      remember(prospectId)
+      if (pick(created.json, 'ownerMembershipId') === repMembershipId) {
+        return fail('the new Prospect is already owned by the Rep')
+      }
+
+      // 3. 501 ids (the one real, 500 that do not exist) go to the queue: 202 queued.
+      const ids = [prospectId]
+      while (ids.length < 501) {
+        ids.push(`prs_${crypto.randomUUID().replaceAll('-', '')}`)
+      }
+      const assigned = await call('POST', core('/v1/prospects/assign'), {
+        headers: { ...authed(ownerSession), 'idempotency-key': `smoke-${runId}-assign` },
+        body: { prospectIds: ids, ownerMembershipId: repMembershipId },
+        once: true,
+      })
+      if (assigned.status !== 202 || pick(assigned.json, 'state') !== 'queued') {
+        return fail(
+          `POST /v1/prospects/assign with ${ids.length} ids answered ${answered(assigned)}, not 202 queued`
+        )
+      }
+
+      // 4. Poll the real Prospect until core's worker has applied the job.
+      const deadline = Date.now() + (options.jobsWaitMs ?? 60_000)
+      for (;;) {
+        if (Date.now() - signedAt > 30_000) {
+          const again = await signIn(email, password)
+          if ('error' in again) {
+            return fail(again.error ?? 'the Owner sign-in failed while waiting')
+          }
+          ownerSession = again.session
+          signedAt = Date.now()
+        }
+        const now = await call('GET', core(`/v1/prospects/${prospectId}`), {
+          headers: authed(ownerSession),
+        })
+        if (now.status !== 200) {
+          return fail(`GET /v1/prospects/{prospectId} answered ${answered(now)}`)
+        }
+        if (pick(now.json, 'ownerMembershipId') === repMembershipId) {
+          return pass('202 queued, then the Prospect belongs to the Rep')
+        }
+        if (Date.now() > deadline) {
+          return fail(
+            'the queued bulk assignment was not applied in time: is core reading JOBS_QUEUE_URL and running its worker?'
+          )
+        }
+        await Bun.sleep(options.jobsIntervalMs ?? 500)
+      }
+    }
+  )
 
   await flow(
     'a second sign-up cannot read the first Organization',
@@ -1362,7 +1584,7 @@ export async function runSmoke(
   await flow(
     'a second Organization cannot see any of the sales history',
     ['transcript', 'dealImport', 'recording'],
-    ['hidden'],
+    ['hidden', 'second'],
     async () => {
       const first = state.transcript
       const imported = state.dealImport
@@ -1397,6 +1619,7 @@ export async function runSmoke(
       if ('error' in second) {
         return fail(second.error ?? 'the sales-check sign-in failed')
       }
+      state.second = { email: email2, password: password2 }
       const other = authed(second.session)
       const firstIds = [...salesIds, dealId, dealIdLost, dealIdThird]
       const leaks = (json: unknown) => {
@@ -1589,6 +1812,65 @@ export async function runSmoke(
       return fail('deleting a deleted Call again did not answer 200 deleted')
     }
     return pass('state deleted, out of search and out of the list')
+  })
+
+  // Lines, through voice: the Owner buys one (voice's in-memory number stand-in, never a real
+  // provider) and lists it, then a second Organization must see none of it.
+  const voice = (path: string) => `${targets.voice}${path}`
+  await flow(VOICE_STEPS[0], ['session'], ['line'], async () => {
+    const who = await owner()
+    if ('problem' in who) {
+      return fail(who.problem)
+    }
+    const headers = authed(who.session)
+    const added = await call('POST', voice('/v1/lines'), {
+      headers: { ...headers, 'idempotency-key': `smoke-${runId}-line` },
+      body: { method: 'buy', country: 'US', label: `Smoke ${runId}` },
+      once: true,
+    })
+    const id = text(pick(added.json, 'id'))
+    if (added.status !== 201 || !id || pick(added.json, 'state') !== 'active') {
+      return fail(`POST /v1/lines answered ${statusOf(added)}, not 201 with an active Line`)
+    }
+    remember(id)
+    const listed = await call('GET', voice('/v1/lines'), { headers })
+    const items = pick(listed.json, 'items')
+    if (listed.status !== 200 || !Array.isArray(items)) {
+      return fail(`GET /v1/lines answered ${statusOf(listed)}, not 200 with items`)
+    }
+    if (!items.some((item) => pick(item, 'id') === id)) {
+      return fail('GET /v1/lines does not list the Line the Owner just added')
+    }
+    state.line = { id }
+    return pass('added through the in-memory number stand-in and listed')
+  })
+
+  await flow(VOICE_STEPS[1], ['line', 'second'], [], async () => {
+    const line = state.line
+    const creds = state.second
+    if (!line || !creds) {
+      return fail('missing the first Organization Line')
+    }
+    const signedIn = await signIn(creds.email, creds.password)
+    if ('error' in signedIn) {
+      return fail(signedIn.error ?? 'the sign-in for the Lines check failed')
+    }
+    const headers = authed(signedIn.session)
+    const listed = await call('GET', voice('/v1/lines'), { headers })
+    const items = pick(listed.json, 'items')
+    if (listed.status !== 200 || !Array.isArray(items)) {
+      return fail(`GET /v1/lines answered ${statusOf(listed)} for the second Organization`)
+    }
+    if (items.length > 0 || (JSON.stringify(listed.json) ?? '').includes(line.id)) {
+      return fail('GET /v1/lines returned a Line of the first Organization')
+    }
+    const read = await call('GET', voice(`/v1/lines/${line.id}`), { headers })
+    if (read.status !== 404 || errorCode(read.json) !== 'line.not_found') {
+      return fail(
+        `reading a Line of the first Organization answered ${statusOf(read)}, not 404 line.not_found`
+      )
+    }
+    return pass('an empty list, and the first Organization Line answers 404 line.not_found')
   })
 
   // Sign in with Google, against the stack's fake provider. Independent of the account steps.

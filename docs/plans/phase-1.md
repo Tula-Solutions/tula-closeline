@@ -63,7 +63,7 @@ Steps with no "after" (1.1, 1.2, 1.3, 1.11) start in parallel.
 
 ## Decisions still to make in this phase
 
-- Infrastructure-as-code tool (step 1.18).
+- Infrastructure-as-code tool (step 1.18): AWS CDK in TypeScript, ADR 0025.
 
 ## Not verified yet
 

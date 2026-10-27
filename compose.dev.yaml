@@ -3,7 +3,7 @@
 #
 # LOCAL DEVELOPMENT ONLY. Every port binds to 127.0.0.1, because Docker bypasses host firewalls.
 # The passwords below exist only to create the database once: scripts/dev.ts replaces the password
-# of every login role (postgres and the four closeline_* roles) with a fresh random value each time
+# of every login role (postgres and the five closeline_* roles) with a fresh random value each time
 # it starts, and refuses to continue if the database has a login role it does not replace. Every
 # *_PASSWORD under the postgres service must name a role in ROLES in scripts/dev-lib.ts; a test
 # reads this file and fails if one does not.
@@ -32,6 +32,8 @@ services:
       CLOSELINE_AUTH_PASSWORD: bootstrap-local-only-replaced-on-every-start
       CLOSELINE_CORE_PASSWORD: bootstrap-local-only-replaced-on-every-start
       CLOSELINE_PLAYBOOK_PASSWORD: bootstrap-local-only-replaced-on-every-start
+      CLOSELINE_VOICE_PASSWORD: bootstrap-local-only-replaced-on-every-start
+      CLOSELINE_OUTBOUND_PASSWORD: bootstrap-local-only-replaced-on-every-start
     ports: ['127.0.0.1:${CLOSELINE_DEV_POSTGRES_PORT:-5440}:5432']
     volumes:
       - postgres-data:/var/lib/postgresql
@@ -52,6 +54,9 @@ services:
     ports: ['127.0.0.1:${CLOSELINE_DEV_QUEUE_PORT:-9324}:9324']
     volumes:
       - ./scripts/dev/elasticmq.conf:/opt/elasticmq.conf:ro
+    # Set by `bun run dev` to a hash of that file, so editing it recreates the container.
+    labels:
+      closeline.queue-config: '${CLOSELINE_DEV_QUEUE_CONFIG_SHA:-unset}'
     # The image declares VOLUME /data. Without this compose makes an anonymous volume that
     # `down --volumes` of this project cannot name. The queues are rebuilt on every start anyway.
     tmpfs:

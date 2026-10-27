@@ -1,5 +1,6 @@
 // Runs the Closeline stack on this machine: `bun run dev`. See docs/local-development.md.
 // This file only parses the arguments and wires the real effects into the flow in dev-flow.ts.
+import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { type FlowContext, type FlowDeps, runDown, runUp } from './dev-flow.ts'
 import {
@@ -32,7 +33,7 @@ const USAGE = `usage: bun run dev [--down [--volumes]]
   --down --volumes   also delete the dev stack's volumes (database and storage data)
 
 Environment: CLOSELINE_SIBLINGS_DIR (where the tula-closeline-* clones are, default: next to
-this repo), CLOSELINE_DEV_{POSTGRES,QUEUE,STORAGE,MAIL,AUTH,CORE,PLAYBOOK,PORTAL,FAKE_GOOGLE}_PORT.
+this repo), CLOSELINE_DEV_{POSTGRES,QUEUE,STORAGE,MAIL,AUTH,CORE,PLAYBOOK,VOICE,PORTAL,FAKE_GOOGLE}_PORT.
 
 Sign in with Google: with no GOOGLE_* variable set, a fake provider (loopback only) is started and
 used. Set all of GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI to use real Google.
@@ -57,7 +58,11 @@ export function createDeps(): FlowDeps {
     lock: acquireStartLock,
     stopHolder: () => stopLockHolder(),
     siblingProblems: (root) => checkSiblings(root),
-    buildEnv: buildStackEnv,
+    buildEnv: (options) =>
+      buildStackEnv({
+        ...options,
+        queueConfig: readFileSync(join(hub, 'scripts/dev/elasticmq.conf'), 'utf8'),
+      }),
     secrets: generateSecrets(),
     salt: freshSalt,
     subscribe: (onSignal) => {
