@@ -10,6 +10,7 @@ import {
   type StepResult,
   VOICE_STEPS,
 } from './dev-smoke.ts'
+import { BOOKING_STEPS } from './dev-smoke-booking.ts'
 import { type FakeOptions, fakeStack } from './dev-smoke-fake.ts'
 import { MAILBOX_STEPS } from './dev-smoke-mailbox.ts'
 
@@ -102,7 +103,11 @@ describe('runSmoke without a mailbox for auth', () => {
     expect(signUp?.status).toBe('skip')
     expect(signUp?.detail).toContain('mail.unavailable')
     expect(results.filter((result) => result.status === 'skip')).toHaveLength(
-      ACCOUNT_STEPS.length + SALES_HISTORY_STEPS.length + VOICE_STEPS.length + MAILBOX_STEPS.length
+      ACCOUNT_STEPS.length +
+        SALES_HISTORY_STEPS.length +
+        VOICE_STEPS.length +
+        MAILBOX_STEPS.length +
+        BOOKING_STEPS.length
     )
     const verify = by(results, 'verify the email code')
     expect(verify?.status).toBe('skip')

@@ -1,3 +1,4 @@
+import { type BookingFakeOptions, createBookingFake } from './dev-smoke-booking-fake.ts'
 import { createOutboundFake, type OutboundFakeOptions } from './dev-smoke-outbound-fake.ts'
 import { createPlaybookFake, type PlaybookFakeOptions } from './dev-smoke-playbook-fake.ts'
 import { createVoiceFake, type VoiceFakeOptions } from './dev-smoke-voice-fake.ts'
@@ -96,6 +97,8 @@ export type FakeOptions = {
   trustOrganizationHeader?: boolean
   /** What is broken in the playbook: see dev-smoke-playbook-fake.ts. */
   playbook?: PlaybookFakeOptions
+  /** What is broken in core's booking routes: see dev-smoke-booking-fake.ts. */
+  booking?: BookingFakeOptions
   /** What is broken in voice: see dev-smoke-voice-fake.ts. */
   voice?: VoiceFakeOptions
   /** What is broken in outbound's Mailbox routes: see dev-smoke-outbound-fake.ts. */
@@ -465,6 +468,7 @@ export function fakeStack(options: FakeOptions = {}) {
     return undefined
   }
 
+  const bookingRoutes = createBookingFake((id) => prospects.get(id)?.orgId, options.booking)
   const demoRequests = new Map<string, { id: string; body: string }>()
   const core = async (request: Request, url: URL, body: Record<string, unknown>) => {
     if (url.pathname === '/v1/marketing/demo-requests' && request.method === 'POST') {
@@ -483,6 +487,10 @@ export function fakeStack(options: FakeOptions = {}) {
       addMail('team@closeline.test', `Demo Request from ${String(body.companyName)}`, id)
       return json({ id }, 201)
     }
+    if (url.pathname.startsWith('/v1/public/booking-types/')) {
+      const answer = await bookingRoutes(request, url.pathname, body, undefined, url.searchParams)
+      return answer ?? error(404, 'request.not_found')
+    }
     const header = request.headers.get('authorization')
     const session = header ? sessions.get(header.replace(/^Bearer /, '')) : undefined
     if (options.coreOpen && url.pathname === '/v1/organization') {
@@ -498,6 +506,17 @@ export function fakeStack(options: FakeOptions = {}) {
     }
     const { pathname } = url
     const method = request.method
+    const me = members.find((m) => m.userId === session.userId && m.orgId === orgId)
+    const booking = await bookingRoutes(
+      request,
+      pathname,
+      body,
+      { orgId, memberId: me?.id ?? '', role: me?.role ?? '' },
+      url.searchParams
+    )
+    if (booking) {
+      return booking
+    }
     if (pathname === '/v1/organization') {
       const shown = options.leak === 'organization' ? [...orgs.keys()][0] : orgId
       return json({
