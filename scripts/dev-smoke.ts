@@ -7,6 +7,7 @@
 // to; the services have no other way in for the test and none is added. No code, token, password,
 // link or address is printed: every message is scrubbed of the values this run has seen.
 import { origins, randomHex, requestWithRetry, resolvePorts } from './dev-lib.ts'
+import { runBookingSteps } from './dev-smoke-booking.ts'
 import { runGoogleSteps } from './dev-smoke-google.ts'
 import { runMailboxSteps } from './dev-smoke-mailbox.ts'
 
@@ -205,6 +206,8 @@ type State = {
   /** The second Organization's sign-in, made by the sales-history check. */
   second?: { email: string; password: string }
   line?: { id: string }
+  /** The invited Rep, made by the bulk assignment check. */
+  rep?: { email: string; password: string; membershipId: string }
 }
 
 /**
@@ -813,7 +816,7 @@ export async function runSmoke(
   await flow(
     'core: a bulk assignment of more than 500 Prospects is queued and completes',
     ['session'],
-    [],
+    ['rep'],
     async () => {
       const core = (path: string) => `${targets.core}${path}`
       const answered = (response: { status: number; json: unknown }) =>
@@ -879,6 +882,7 @@ export async function runSmoke(
         return fail(`GET /v1/members shows no Rep (${answered(members)})`)
       }
       remember(repMembershipId)
+      state.rep = { email: repEmail, password: repPassword, membershipId: repMembershipId }
 
       // 2. One real Prospect, owned by the Owner.
       const created = await call('POST', core('/v1/prospects'), {
@@ -1874,6 +1878,35 @@ export async function runSmoke(
       )
     }
     return pass('an empty list, and the first Organization Line answers 404 line.not_found')
+  })
+
+  // Booking through a public link, with the Rep's local calendar.
+  const sessionFor = (creds: { email: string; password: string } | undefined) =>
+    creds === undefined
+      ? undefined
+      : async () => {
+          const found = await signIn(creds.email, creds.password)
+          return 'error' in found
+            ? { problem: found.error ?? 'a sign-in for the Booking steps failed' }
+            : { token: found.session.accessToken }
+        }
+  await runBookingSteps({
+    core: targets.core,
+    call,
+    step: async (name, body) => {
+      await step(name, body)
+      return results.at(-1)?.status ?? 'fail'
+    },
+    remember,
+    minted,
+    answered: statusOf,
+    runId,
+    who: {
+      owner: sessionFor({ email, password }) ?? (async () => ({ problem: 'no Owner' })),
+      rep: sessionFor(state.rep),
+      other: sessionFor(state.second),
+    },
+    repMembershipId: state.rep?.membershipId,
   })
 
   // Gmail Mailbox through the fake provider, as the signed-in Owner.
