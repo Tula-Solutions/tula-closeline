@@ -2,7 +2,7 @@ import './test-guard.ts'
 import { describe, expect, test } from 'bun:test'
 import { exitCodeFor, runSmoke, type StepResult } from './dev-smoke.ts'
 import { type FakeOptions, fakeStack } from './dev-smoke-fake.ts'
-import { MAILBOX_STEPS, TEST_SEND_SKIP } from './dev-smoke-mailbox.ts'
+import { MAILBOX_STEPS, NO_MAILBOX_SKIP, TEST_SEND_SKIP } from './dev-smoke-mailbox.ts'
 
 const by = (results: StepResult[], name: string) => results.find((result) => result.name === name)
 const fast = {
@@ -43,6 +43,14 @@ describe('the Mailbox smoke steps', () => {
     const send = by(results, MAILBOX_STEPS[1])
     expect(send?.status).toBe('skip')
     expect(send?.detail).toBe(TEST_SEND_SKIP)
+    expect(exitCodeFor(results)).toBe(0)
+    expect(exitCodeFor(results, true)).toBe(1)
+  })
+
+  test('an outbound without Mailbox routes skips both steps with the reason, strict fails', async () => {
+    const { results } = await run({ outbound: { noMailbox: true } })
+    expect(mailbox(results).map((result) => result?.status)).toEqual(['skip', 'skip'])
+    expect(by(results, MAILBOX_STEPS[0])?.detail).toBe(NO_MAILBOX_SKIP)
     expect(exitCodeFor(results)).toBe(0)
     expect(exitCodeFor(results, true)).toBe(1)
   })

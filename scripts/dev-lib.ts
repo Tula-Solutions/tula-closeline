@@ -685,6 +685,10 @@ export function buildStackEnv(options: {
       ...base,
       ...common,
       PORT: String(ports.outbound),
+      DATABASE_URL: databaseUrl('closeline_outbound', secrets, ports, host),
+      AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
+      AUTH_ISSUER: where.auth,
+      AUTH_AUDIENCE: 'closeline',
       // Where the enrichment waterfall reads a Prospect and writes enriched fields back.
       CORE_URL: where.core,
       CORE_INTERNAL_SECRET: secrets.outboundCoreToken,

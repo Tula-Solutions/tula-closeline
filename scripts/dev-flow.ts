@@ -455,7 +455,9 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
         deps.say(
           `voice   ${where.voice}  (Lines; numbers come from an in-memory stand-in, never Twilio)`
         )
-        deps.say(`outbound ${where.outbound}  (health routes only so far)`)
+        deps.say(
+          `outbound ${where.outbound}  (Mailbox through the fake Google when outbound has it)`
+        )
         deps.say(`portal  ${where.portal}`)
         deps.say(
           stack.fakeGoogle

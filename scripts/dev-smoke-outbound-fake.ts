@@ -4,6 +4,8 @@
 
 /** What can be broken in the outbound fake. Every option is off by default. */
 export type OutboundFakeOptions = {
+  /** Outbound has no Mailbox routes at all: connect answers 404 request.not_found. */
+  noMailbox?: boolean
   /** The test-send route does not exist yet: it answers 404 request.not_found. */
   noTestSend?: boolean
   /** The test-send route answers 502. */
@@ -38,6 +40,9 @@ export function createOutboundFake(config: {
     const token = request.headers.get('authorization')?.replace(/^Bearer /, '')
     if (!token || !config.orgOf(token)) {
       return error(401, token ? 'auth.token_invalid' : 'auth.unauthenticated')
+    }
+    if (options.noMailbox && pathname.startsWith('/v1/mailboxes')) {
+      return error(404, 'request.not_found')
     }
     if (request.method === 'POST' && pathname === '/v1/mailboxes/connect') {
       const url = new URL(`${config.googleOrigin()}/authorize`)

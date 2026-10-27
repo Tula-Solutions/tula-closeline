@@ -18,6 +18,10 @@ export const MAILBOX_STEPS = [
 export const TEST_SEND_SKIP =
   'outbound has no test-send route yet (it needs contract v0.52.0 and the outbound Mailbox change merged)'
 
+/** Why the first step is skipped when outbound answers 404 on the connect route itself. */
+export const NO_MAILBOX_SKIP =
+  'outbound has no Mailbox routes yet (the outbound Mailbox change is not in this stack)'
+
 /** The path of outbound's test-send route; align with the contract once v0.52.0 is in. */
 const testSendPath = (mailboxId: string) => `/v1/mailboxes/${mailboxId}/test-send`
 
@@ -87,7 +91,11 @@ export async function runMailboxSteps(kit: MailboxKit): Promise<void> {
       body: JSON.stringify({ provider: 'gmail' }),
       idempotent: false,
     })
-    const authorizationUrl = asText((await jsonOf(started)).authorizationUrl)
+    const startedBody = await jsonOf(started)
+    if (started.status === 404 && codeOf(startedBody) !== 'mailbox.not_found') {
+      return skip(NO_MAILBOX_SKIP)
+    }
+    const authorizationUrl = asText(startedBody.authorizationUrl)
     const url =
       authorizationUrl !== undefined && URL.canParse(authorizationUrl)
         ? new URL(authorizationUrl)
