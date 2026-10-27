@@ -128,8 +128,9 @@ describe('secrets', () => {
     expect(secrets.internalToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.playbookToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.voiceCoreToken).toMatch(/^[0-9a-f]{64}$/)
+    expect(secrets.voicePlaybookToken).toMatch(/^[0-9a-f]{64}$/)
     expect(secrets.unsubscribeTokenKey).toMatch(/^[0-9a-f]{64}$/)
-    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 5)
+    expect(new Set(secretValues(secrets)).size).toBe(ROLES.length + 6)
   })
 
   test('differ on every run when the real generator is used', () => {
@@ -370,10 +371,26 @@ describe('buildStackEnv', () => {
     expect(env.playbook.QUEUE_URL).toBe('http://127.0.0.1:9324/000000000000/closeline-playbook')
     expect(env.playbook.STORAGE_ENDPOINT).toBe('http://127.0.0.1:9090')
     expect(env.playbook.STORAGE_BUCKET).toBe('closeline-dev')
-    expect(env.playbook.INTERNAL_API_TOKENS).toBe(secrets.playbookToken)
+    expect(env.playbook.INTERNAL_API_TOKENS?.split(',')).toEqual([
+      secrets.playbookToken,
+      secrets.voicePlaybookToken,
+    ])
     expect(secrets.playbookToken).not.toBe(secrets.internalToken)
     expect(JSON.stringify(env.core)).not.toContain(secrets.playbookToken)
     expect(JSON.stringify(env.auth)).not.toContain(secrets.playbookToken)
+  })
+
+  test('voice reaches the playbook internally with its own secret, which the playbook also accepts', () => {
+    const env = build()
+    expect(env.voice.PLAYBOOK_INTERNAL_URL).toBe('http://127.0.0.1:3003')
+    expect(env.voice.PLAYBOOK_INTERNAL_TOKEN).toBe(secrets.voicePlaybookToken)
+    expect(env.playbook.INTERNAL_API_TOKENS?.split(',')).toContain(secrets.voicePlaybookToken)
+    expect(secrets.voicePlaybookToken).not.toBe(secrets.playbookToken)
+    expect(secretValues(secrets)).toContain(secrets.voicePlaybookToken)
+    for (const service of ['auth', 'core', 'outbound', 'portal'] as const) {
+      expect(JSON.stringify(env[service])).not.toContain(secrets.voicePlaybookToken)
+    }
+    expect(JSON.stringify(env.voice)).not.toContain(secrets.playbookToken)
   })
 
   test('the playbook gets no setting that would turn its in-process stand-ins off or on elsewhere', () => {

@@ -160,6 +160,8 @@ export type Secrets = {
   playbookToken: string
   /** The bearer secret voice presents to core's internal directory; core lists it beside auth's. */
   voiceCoreToken: string
+  /** The bearer secret voice presents to the playbook's internal routes; the playbook lists it too. */
+  voicePlaybookToken: string
   /** The bearer secret outbound presents to core's internal Prospect routes; core lists it too. */
   outboundCoreToken: string
   /** The key core signs and checks unsubscribe tokens with. */
@@ -177,6 +179,7 @@ export function generateSecrets(random: (size: number) => Buffer = randomBytes):
     internalToken: randomHex(32, random),
     playbookToken: randomHex(32, random),
     voiceCoreToken: randomHex(32, random),
+    voicePlaybookToken: randomHex(32, random),
     outboundCoreToken: randomHex(32, random),
     unsubscribeTokenKey: randomHex(32, random),
   }
@@ -189,6 +192,7 @@ export function secretValues(secrets: Secrets): string[] {
     secrets.internalToken,
     secrets.playbookToken,
     secrets.voiceCoreToken,
+    secrets.voicePlaybookToken,
     secrets.outboundCoreToken,
     secrets.unsubscribeTokenKey,
   ]
@@ -653,7 +657,7 @@ export function buildStackEnv(options: {
       AUTH_JWKS_URL: `${where.auth}/.well-known/jwks.json`,
       AUTH_ISSUER: where.auth,
       AUTH_AUDIENCE: 'closeline',
-      INTERNAL_API_TOKENS: secrets.playbookToken,
+      INTERNAL_API_TOKENS: `${secrets.playbookToken},${secrets.voicePlaybookToken}`,
       // The queue and object storage stand-ins of the compose file. They ignore the credentials,
       // but the AWS SDK will not sign a request without some.
       AWS_REGION: 'us-east-1',
@@ -678,6 +682,9 @@ export function buildStackEnv(options: {
       // The directory voice reads a caller's Membership from.
       CORE_INTERNAL_URL: where.core,
       CORE_INTERNAL_TOKEN: secrets.voiceCoreToken,
+      // Where voice reads an Organization's Playbook evidence from; it sends its own secret.
+      PLAYBOOK_INTERNAL_URL: where.playbook,
+      PLAYBOOK_INTERNAL_TOKEN: secrets.voicePlaybookToken,
       // The in-process stand-in: no real telephony provider is ever called from a dev stack.
       TELEPHONY_PROVIDER: 'memory',
     },

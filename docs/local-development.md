@@ -90,7 +90,8 @@ back to in-memory queues, which hide a broken queue wiring. No other dev service
 `STORAGE_ENDPOINT` for S3Mock (bucket `closeline-dev`); placeholder AWS credentials, because the
 SDK will not sign a request without some (both stand-ins ignore them); the same `AUTH_JWKS_URL`,
 `AUTH_ISSUER` and `AUTH_AUDIENCE` core uses; and its own internal secret
-(`INTERNAL_API_TOKENS`, generated each run and different from the one auth and core share). Its
+(`INTERNAL_API_TOKENS`, generated each run and different from the one auth and core share, followed
+by the one voice presents). Its
 polling loops are set to 1 s (`INGESTION_POLL_INTERVAL_MS`, `TRANSCRIBE_POLL_INTERVAL_MS`) so a
 test does not wait on the 5 s defaults. The vector store, embedder, OCR reader and transcriber have
 no real adapter yet; the playbook runs in-process stand-ins for them and allows that only when
@@ -235,6 +236,9 @@ never written to a file and never printed (output is also scrubbed of their valu
 - the internal secret auth presents to core (`CORE_INTERNAL_TOKEN` in auth, `INTERNAL_API_TOKENS`
   in core), and
 - the playbook's own internal secret (`INTERNAL_API_TOKENS` in the playbook only), and
+- the internal secret voice presents to the playbook (`PLAYBOOK_INTERNAL_TOKEN` in voice, listed
+  after the playbook's own in its `INTERNAL_API_TOKENS`); voice's `PLAYBOOK_INTERNAL_URL` is the
+  playbook's origin (a voice build without those settings ignores them), and
 - the internal secret voice presents to core's internal directory (`CORE_INTERNAL_TOKEN` in voice,
   listed after auth's in core's `INTERNAL_API_TOKENS`); voice's `CORE_INTERNAL_URL` is core's origin.
 
