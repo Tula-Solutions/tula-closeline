@@ -1,4 +1,4 @@
-# ADR 0020 — Telephony: Telnyx behind a call port, with our own media layer as the way out
+# ADR 0027 — Telephony: Telnyx behind a call port, with our own media layer as the way out
 
 **Status:** Accepted (the owner chose Telnyx on 2026-10-14; the EU terms below are still open)
 **Date:** 2026-10-14

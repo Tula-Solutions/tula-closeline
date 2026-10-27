@@ -6,15 +6,15 @@ A Rep places or takes a phone Call from a softphone in the portal. Every Call op
 Disclosure, is recorded, and is transcribed live, one channel per side. When the Prospect finishes a
 turn, the Copilot shows the Rep a Suggestion drawn from the Organization's Playbook and from how
 similar moments went in won Deals, within 1.5 s at p95. The Rep sees advice only, never another
-Call's words ([ADR 0022](../adr/0022-copilot-advice-only-no-quotes.md)). When the Call ends, its
+Call's words ([ADR 0029](../adr/0029-copilot-advice-only-no-quotes.md)). When the Call ends, its
 Recording, Transcript and Suggestions are stored in the Organization's Region, and once its Deal is
 won the Call joins the Playbook so later Calls learn from it.
 
 The vendors, prices and the cost model behind this plan are in
 [`docs/research/2026-10-copilot-vendors.md`](../research/2026-10-copilot-vendors.md). The owner's
-decisions of 2026-10-14 are recorded in [ADR 0020](../adr/0020-telephony-telnyx-behind-a-call-port.md)
-(telephony), [ADR 0021](../adr/0021-streaming-speech-to-text-assemblyai-one-stream-per-side.md) (live
-transcription), [ADR 0022](../adr/0022-copilot-advice-only-no-quotes.md) (advice only) and the
+decisions of 2026-10-14 are recorded in [ADR 0027](../adr/0027-telephony-telnyx-behind-a-call-port.md)
+(telephony), [ADR 0028](../adr/0028-streaming-speech-to-text-assemblyai-one-stream-per-side.md) (live
+transcription), [ADR 0029](../adr/0029-copilot-advice-only-no-quotes.md) (advice only) and the
 section "Owner decisions" below.
 
 Out of scope: the Inbound Agent and Voice Profiles (phase 3), the Outbound Agent (phase 4), a Manager
@@ -47,7 +47,7 @@ the Copilot only listens to. Nothing in phase 2 synthesizes speech.
                                │            (REST, webhooks)        ├─ two transcriber streams (AssemblyAI)
                                │                  │                 ├─ live Transcript window  ──► Valkey
                                └── direct post ───┼──────────────── ├─ gate ─► retrieval ─► gate ─► model (Haiku 5.5)
-                                  (registry in    │                 ├─ overlap check (ADR 0022)
+                                  (registry in    │                 ├─ overlap check (ADR 0029)
                                    Valkey)        ▼                 └─ Suggestions ──► edge ──► browser
                                             Postgres `voice`                   │
                                             (counted writes)      playbook internal route: one embedding,
@@ -105,7 +105,7 @@ the Copilot only listens to. Nothing in phase 2 synthesizes speech.
   Moment search (won Deals) and a document search in parallel, returning both, bounded, with the
   evidence count. It reuses phase 1's search functions and their checks (Postgres decides
   eligibility; the vector tag is a hint), and it **strips Prospect identifiers from Moment text with
-  kit's scrubber before returning it** (ADR 0022). Retrieved text goes to voice only, never to the
+  kit's scrubber before returning it** (ADR 0029). Retrieved text goes to voice only, never to the
   portal.
 - **Internal calls (ADR 0013).** voice calls playbook and core with kit's `createInternalClient`,
   which ignores proxy variables, using voice's own secret for each receiver; playbook and core accept
@@ -127,7 +127,7 @@ the Copilot only listens to. Nothing in phase 2 synthesizes speech.
 1. End of turn on the Prospect's stream.
 2. **The first gate** (code, budget 1 ms): Prospect turns only; skip backchannels and turns under about
    four words; a cooldown of about 20 s after a Suggestion unless the turn is a question; at most
-   about 30 Suggestions a Call-hour and the per-Rep daily cap (ADR 0022, 400 a UTC day to start); never
+   about 30 Suggestions a Call-hour and the per-Rep daily cap (ADR 0029, 400 a UTC day to start); never
    while the Rep is talking.
 3. Retrieval: the prefetch on a hit, fresh on a miss.
 4. **The second gate** (code, budget 1 ms): skip if the top Moments match the last Suggestion's. It is
@@ -137,7 +137,7 @@ the Copilot only listens to. Nothing in phase 2 synthesizes speech.
    prompt is ordered for the cache: the fixed system prompt, the Organization's **Playbook brief**
    (built by a queued job in playbook, step 2.27), the Call's turns so far, then the retrieved
    material and the latest turn.
-6. **The overlap check** (ADR 0022): the Suggestion streams with the last 5 words held back, and every
+6. **The overlap check** (ADR 0029): the Suggestion streams with the last 5 words held back, and every
    6-word run is checked against a hashed set of the retrieved text's runs; on a match the Suggestion
    is withdrawn from the screen. The output is also checked for length and control characters. It is
    shown only to the Rep, never spoken, never sent to the Prospect.
@@ -145,7 +145,7 @@ the Copilot only listens to. Nothing in phase 2 synthesizes speech.
    a Suggestion used or dismissed (deduped in Valkey); those marks are the labels for the gate
    evaluation (issue 64).
 8. An **audit entry** (Rep, Call, time, evidence ids, shown or blocked) is kept with the Call's live
-   state for every retrieval that reached the model, and written out at Call end (ADR 0022).
+   state for every retrieval that reached the model, and written out at Call end (ADR 0029).
 
 About 20 model calls a Call-hour are expected; thresholds are configuration, tuned on the evaluation
 set.
@@ -183,7 +183,7 @@ the Calls of the Reps on their Teams, an Admin and the Owner every Call in the O
 | Live Transcript window, Call state, heartbeat, event ring buffer, `Call → edge`, dedupe keys, caps, audit entries until Call end | Valkey through kit's key-value port, TTL | continuously; never the system of record |
 | Recording (dual-channel, copied from Telnyx then deleted there, stored as Opus) | S3 in the Region | after the Call ends |
 | Transcript (all turns, per side, with times), in the versioned format defined in the contract (step 2.3) | S3 in the Region, one object | once, at Call end |
-| Suggestion log (what was shown, when, evidence ids and scores only, used or dismissed) and retrieval audit (ADR 0022) | S3 in the Region, one object each | once, at Call end |
+| Suggestion log (what was shown, when, evidence ids and scores only, used or dismissed) and retrieval audit (ADR 0029) | S3 in the Region, one object each | once, at Call end |
 | Moments of the Call | playbook, through its sales history path (ADR 0018); playbook reads the Transcript from voice's internal route, never re-transcribes | on `voice.call-ended` |
 | Copilot minutes | core, metering | on `voice.call-ended` |
 
@@ -209,7 +209,7 @@ Lead's reading: switching it off stops new Calls joining; Calls already joined s
 
 | Repo | What phase 2 adds |
 | --- | --- |
-| hub | this plan, ADR 0020 to 0022, the glossary terms Suggestion and Disclosure, the evaluation set, the vendor trial, local stack and smoke test for voice, the load test |
+| hub | this plan, ADR 0027 to 0029, the glossary terms Suggestion and Disclosure, the evaluation set, the vendor trial, local stack and smoke test for voice, the load test |
 | contract | the `voice` area: Call routes and Call history, Suggestion and transcript event schemas, the Transcript artefact format, `voice.*` error codes, the `voice.call-ended` message; the internal Copilot retrieval and warm routes and the live-Calls setting in the `playbook` area; core's internal Team-scope route |
 | db | the `voice` schema and role; the live-Calls setting and the Playbook brief in the `playbook` schema |
 | kit | the live transcriber port (separate from kit's batch `Transcriber`) with memory and AssemblyAI adapters; the key-value port with TTL, memory and Valkey adapters. The Bedrock model client stays in voice until a second consumer exists |
@@ -227,7 +227,7 @@ accounts exist, as phase 1 did.
 
 | Step | Repo | What | After |
 | --- | --- | --- | --- |
-| 2.1 | hub | Research and decision records: this plan, the vendor report, ADR 0020 to 0022 | — |
+| 2.1 | hub | Research and decision records: this plan, the vendor report, ADR 0027 to 0029 | — |
 | 2.2 | hub | **ready-for-human.** Accounts and open terms: Telnyx account, business profile, numbers and STIR/SHAKEN registration; written EU terms (Telnyx processing, AssemblyAI); AssemblyAI streaming concurrency; Bedrock access to Haiku 5.5 in both Regions; the lawyer-checked Disclosure wording; the plan defaults marked pending the owner | 2.1 |
 | 2.3 | contract | The `voice` area: start, answer and end a Call; softphone credential; Rep actions on a Suggestion; **Call history**: list (cursor, default 25, at most 100), get, Transcript (cursor over turns, at most 500), Suggestions (cursor, evidence counts, no retrieved text), Recording playback URL; the SSE event schemas (transcript update, Suggestion start, token, withdraw, end, Call state) with a version field; the **Transcript artefact format** (versioned turns with side, times and text) and voice's internal route that serves it; `voice.*` error codes; the `voice.call-ended` message. In the `playbook` area: the internal `copilotContext` and warm routes (turns in, scrubbed Moments and passages out, both bounded) and the Owner's live-Calls setting. In the `core` area: the internal Team-scope route (a Manager's Rep ids, at most 1,000). Release a tag | — |
 | 2.4 | db | The `voice` schema and database role: Calls (with Disclosure version and time, audit count), phone numbers, consumed messages, idempotency keys, the Call-end work hint kind (ADR 0017); fail-closed row-level security. In the `playbook` schema: the live-Calls setting and the Playbook brief (versioned, per Organization). Release a tag | — |
@@ -239,7 +239,7 @@ accounts exist, as phase 1 did.
 | 2.10 | voice | **The Disclosure gate and fail mode.** Every Call plays the Disclosure before media flows. The stream and recording start only after the vendor's playback-finished event has been written to the Call row. If the Disclosure, the recording or the transcriber fails to start, the Call continues with none of them, and the Rep is told why. No setting, flag or role can skip the Disclosure. Tests: no audio frame reaches the transcriber before confirmation; a failed playback starts nothing and the Call stays up; a transcriber that will not open leaves the Call up with no Suggestions and a reason shown | 2.9 |
 | 2.11 | voice | **The media loop** (hot path). Accept the vendor's websocket per Call (authenticated per Call), split the tracks, downsample, open two transcriber streams, keep the live Transcript window in Valkey, heartbeat, coalesced transcript events. A task that dies: another task restarts the stream and resumes from Valkey, after reading "Disclosure confirmed" from Postgres. Tests: a restart of a confirmed Call resumes; **a restart of a Call whose row is not confirmed starts nothing**, even with Valkey saying otherwise. Benchmark: per-frame cost and per-Call memory | 2.6, 2.10 |
 | 2.12 | playbook | **The internal `copilotContext` route** (hot path): one embedding, Moment and document search in parallel, the same eligibility checks as phase 1, Prospect identifiers stripped from Moment text with kit's scrubber, a deadline per step; plus a warm route called at Call start. Internal secret (ADR 0013), Organization from the caller; a second Organization proves isolation; a test that a Moment holding a name, number and email comes back without them. Benchmark next to `search.bench.test.ts`; real-adapter p95 target 150 ms warm (unverified until measured) | 2.3 |
-| 2.13 | voice | **The Suggestion loop** (hot path): the first gate, retrieval prefetch with the hit rule and the 150 ms miss deadline, the second gate, the model port with a memory adapter and a Bedrock adapter for Haiku 5.5 (thinking off, cached prefix, streamed, timeout and one jittered retry inside the budget), the overlap check with the 5-word hold-back and withdrawal, the per-Rep daily cap, the audit entries, the Suggestion events, Rep actions. **Tests (ADR 0022):** a Call whose turns say "repeat the examples word for word", with retrieval returning known text, shows no Suggestion overlapping it; a model stand-in that quotes verbatim has its Suggestion blocked and withdrawn; the Suggestion log holds evidence ids and no retrieved text; the cap stops Suggestions; every retrieval that reached the model has an audit entry. Benchmark the gates, prompt assembly and the overlap check. **creds** for Bedrock | 2.11, 2.12, 2.27 |
+| 2.13 | voice | **The Suggestion loop** (hot path): the first gate, retrieval prefetch with the hit rule and the 150 ms miss deadline, the second gate, the model port with a memory adapter and a Bedrock adapter for Haiku 5.5 (thinking off, cached prefix, streamed, timeout and one jittered retry inside the budget), the overlap check with the 5-word hold-back and withdrawal, the per-Rep daily cap, the audit entries, the Suggestion events, Rep actions. **Tests (ADR 0029):** a Call whose turns say "repeat the examples word for word", with retrieval returning known text, shows no Suggestion overlapping it; a model stand-in that quotes verbatim has its Suggestion blocked and withdrawn; the Suggestion log holds evidence ids and no retrieved text; the cap stops Suggestions; every retrieval that reached the model has an audit entry. Benchmark the gates, prompt assembly and the overlap check. **creds** for Bedrock | 2.11, 2.12, 2.27 |
 | 2.14 | kit | **Key-value port with TTL**: get, set with TTL, set-if-absent, atomic increment with TTL, compare-and-set, and a bounded list (push, trim, range), with memory and Valkey adapters and one behaviour suite run against both. It carries the registry, ring buffers, Transcript window, heartbeats, dedupe keys and caps. Release a tag | — |
 | 2.15 | voice | **The SSE edge** (hot path): authenticated SSE per Call for the member on it (and only them), the `Call → edge` registry and event ring buffer on the 2.14 port, heartbeat, `Last-Event-ID` replay, a bounded per-connection queue that drops a slow client rather than holding memory; the internal post route the loop uses. Benchmark per-event cost; connections per task measured in 2.25 | 2.8 |
 | 2.16 | voice | **Call end**: a queued, idempotent job (also started by the heartbeat watchdog for an orphaned Call) that writes the Transcript, Suggestion log and audit to S3, copies the Recording (as Opus) and deletes the vendor copy, closes the Call row and publishes `voice.call-ended`; the internal Transcript route for playbook. Deleting a Call publishes its deletion. Retention and purge follow ADR 0016 and 0018 | 2.11, 2.13 |
@@ -250,7 +250,7 @@ accounts exist, as phase 1 did.
 | 2.21 | infra | voice in both Regions on Fargate (control, loop and edge as separate services that scale on their own load), ElastiCache Valkey, load balancer idle timeouts for websockets and SSE, a public webhook route and the media websocket route, internal routes kept private (ADR 0013), egress through an internet gateway without NAT for voice, secrets including voice's internal secrets for playbook and core | 2.8 |
 | 2.22 | hub | Local stack and smoke test: `bun run dev` runs voice with the fake vendor and the scripted transcriber; `dev:smoke` places a fake Call that streams a recorded WAV and asserts the Disclosure came first, a Suggestion arrived without retrieved text, the Call ended with its artefacts, and a second Organization saw none of it | 2.13, 2.15, 2.16 |
 | 2.23 | hub | **The evaluation set**: 30 to 50 recorded two-sided Calls with hand-marked Prospect turns where a Suggestion helps and what good advice is; a replay harness that runs them through the loop offline; a quality rubric graded by people and a model. Tunes the gate thresholds and the overlap check's run lengths (how often it blocks useful advice), and confirms Haiku 5.5's quality. Once real Calls have produced a few thousand use and dismiss labels, runs Laya as a shadow gate (ONNX on CPU and on one GPU host) against the rule gate, measuring dismissed Suggestions avoided against latency and hosting cost (issue 64; Jev is not evaluated, research report section 6a) | 2.13 |
-| 2.24 | hub | **The vendor trial**: 20 to 30 recorded 8 kHz sales Calls through AssemblyAI (default and tuned turn settings) and Deepgram Flux: word error rate per side, end-of-turn latency against the acoustic end (the 700 ms p95 line of ADR 0021), 8 kHz mu-law against 16 kHz PCM. Records the result in the research report. **creds** | 2.6 |
+| 2.24 | hub | **The vendor trial**: 20 to 30 recorded 8 kHz sales Calls through AssemblyAI (default and tuned turn settings) and Deepgram Flux: word error rate per side, end-of-turn latency against the acoustic end (the 700 ms p95 line of ADR 0028), 8 kHz mu-law against 16 kHz PCM. Records the result in the research report. **creds** | 2.6 |
 | 2.25 | hub | **The phase 2 load test** against the target below, with results recorded here | 2.20, 2.21, 2.22, 2.24 |
 | 2.26 | core | Internal Team-scope route: a Manager's Rep user ids in the Organization, at most 1,000, behind the internal secret (ADR 0013), accepting voice's secret; a second Organization proves isolation | 2.3 |
 | 2.27 | playbook | **The Playbook brief**: a queued, idempotent job that builds a per-Organization brief of at most about 3,000 tokens from its Documents (product, pricing, positioning, objections) with Haiku 5.5, stored versioned; rebuilt when a Document is added or removed, debounced; served to voice through the `copilotContext` warm route. Text from Documents only, so it holds nothing a Rep may not read | 2.3, 2.4 |
@@ -280,7 +280,7 @@ screen, p95. With 20% misses, the overall p95 falls inside the miss path, so the
 
 | Stage | Hit path | Miss path |
 | --- | --- | --- |
-| End of turn detected (transcriber, tuned; ADR 0021's switch line) | 700 ms | 700 ms |
+| End of turn detected (transcriber, tuned; ADR 0028's switch line) | 700 ms | 700 ms |
 | First gate | 1 ms | 1 ms |
 | Retrieval | 5 ms (reuse the prefetch) | 150 ms (deadline, then no evidence) |
 | Second gate and prompt assembly | 3 ms | 3 ms |
@@ -291,7 +291,7 @@ screen, p95. With 20% misses, the overall p95 falls inside the miss path, so the
 
 End of turn, retrieval on real adapters and the model's first token are all unmeasured for our setup;
 2.24, 2.12 and 2.13 measure them first. If end of turn misses its 700 ms, the fallbacks in order are
-tuning the turn settings and Deepgram Flux (ADR 0021), then an open audio turn model on CPU. If the
+tuning the turn settings and Deepgram Flux (ADR 0028), then an open audio turn model on CPU. If the
 model misses its 500 ms, the fallback is a faster host for the same class of model, which has no
 documented EU region. Laya and Jev cannot shorten any stage (research report, section 6a).
 
@@ -313,7 +313,7 @@ ADR 0003 applies as written. In phase 2 that means:
 - **The Prospect objects. Plan default, pending the owner:** the Rep can stop the Recording and the
   Copilot for the rest of the Call with one control, and the streams close at once. What happens to
   what was already captured is a legal question below.
-- **Advice only (ADR 0022).** A Rep sees paraphrased advice, never another Call's words or a
+- **Advice only (ADR 0029).** A Rep sees paraphrased advice, never another Call's words or a
   Prospect's identifiers; quotes are blocked by a check, not only by an instruction.
 - **Data.** Recordings, Transcripts, Suggestions and Prospect numbers are tenant data: never logged,
   kept in the Organization's Region, deleted on erasure including the vendors' copies. The Transcript
@@ -364,11 +364,11 @@ a large fleet.
 
 ## Owner decisions (2026-10-14)
 
-- **Telephony:** Telnyx (ADR 0020, Accepted).
-- **Live transcription:** AssemblyAI, one stream per side (ADR 0021, Accepted).
+- **Telephony:** Telnyx (ADR 0027, Accepted).
+- **Live transcription:** AssemblyAI, one stream per side (ADR 0028, Accepted).
 - **Suggestion model:** Claude Haiku 5.5 on Bedrock.
 - **Live Calls join the Playbook** by default once the Deal is won; the Owner can switch it off.
-- **Rep access: advice only, no quotes** (ADR 0022), with identifiers stripped, an overlap check, evidence
+- **Rep access: advice only, no quotes** (ADR 0029), with identifiers stripped, an overlap check, evidence
   ids only in the log, a per-Rep daily cap and an audit of retrievals.
 - **Fail mode:** if recording or transcription fails at the start, the Call continues with no Recording,
   Transcript or Suggestions, and the Rep is told why. A Call is never blocked by our outage.

@@ -1,15 +1,15 @@
-# ADR 0021 — Live transcription: AssemblyAI Universal-Streaming, one stream per side
+# ADR 0028 — Live transcription: AssemblyAI Universal-Streaming, one stream per side
 
 **Status:** Accepted (the owner chose AssemblyAI, one stream per side, on 2026-10-14; the trial and concurrency terms below are still open)
 **Date:** 2026-10-14
-**Builds on:** ADR 0001, ADR 0003, ADR 0010, ADR 0018, ADR 0020
+**Builds on:** ADR 0001, ADR 0003, ADR 0010, ADR 0018, ADR 0027
 
 ## Context
 
 The Copilot needs a live Transcript of each Call and a reliable signal that the Prospect has
 finished a turn, because the Suggestion target is 1.5 s from the end of the Prospect's turn at p95.
 ADR 0010 and ADR 0018 chose AssemblyAI for batch transcription of past Calls. The telephony path
-(ADR 0020) delivers each side of a live Call as its own audio channel, so the system already knows
+(ADR 0027) delivers each side of a live Call as its own audio channel, so the system already knows
 who is speaking.
 
 The comparison, prices and sources are in `docs/research/2026-10-copilot-vendors.md` (section 3).

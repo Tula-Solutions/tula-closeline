@@ -1,4 +1,4 @@
-# ADR 0022 — The Copilot gives a Rep advice only, never quotes
+# ADR 0029 — The Copilot gives a Rep advice only, never quotes
 
 **Status:** Accepted
 **Date:** 2026-10-14

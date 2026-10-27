@@ -18,7 +18,7 @@ The job: a Rep places or takes a phone Call from a softphone in the portal. Both
 
 **Total, at list prices on the managed path: about $1.27 per Rep-hour** (section 7), of which telephony is about three quarters and transcription about a quarter. The model, retrieval and transport together are about 1%. The cost work that matters is therefore telephony and transcription, not the model. Section 7 works the cost at 1,000, 100,000 and 1,000,000 concurrent Calls.
 
-Two choices are hard to reverse, cost real money and need accounts, so they are drafted as Proposed decision records for the owner: telephony (ADR 0020) and live transcription (ADR 0021).
+Two choices are hard to reverse, cost real money and need accounts, so they are drafted as Proposed decision records for the owner: telephony (ADR 0027) and live transcription (ADR 0028).
 
 ## 2. Telephony and softphone
 
@@ -27,7 +27,7 @@ The Copilot Call is one browser WebRTC leg, one US outbound PSTN leg, both sides
 | | Twilio | Telnyx | Vonage | Plivo | Own media: self-hosted LiveKit and Telnyx trunk | LiveKit Cloud and trunk | Amazon Chime SDK |
 |---|---|---|---|---|---|---|---|
 | US outbound PSTN, per min | $0.0140 [T1] | $0.005 SIP plus $0.002 Voice API [T2] | about $0.014 (secondary) [T9] | $0.0115 [T3] | $0.005 [T2] | $0.005 plus $0.003 to $0.004 LiveKit SIP [T5] | $0.0048 Voice Connector [T4] |
-| US inbound local, per min | $0.0085 | from $0.0032 | about $0.0049 (secondary) | $0.0055 | from $0.0032 | $0.01 on a LiveKit number | $0.0022 |
+| US inbound local, per min | $0.0085 | from $0.0032 | about $0.0049 (secondary) | $0.0055 | from $0.0032 | $0.01 on a LiveKit number | $0.0029 |
 | Browser (WebRTC) leg, per min | $0.0040 | $0.002 | unverified | $0.0033 | our compute only | $0.0004 to $0.0005 per participant | $0.0017 per attendee |
 | Audio stream to our service, per min | $0.0044 [T11] | $0.0035 [T2] | about $0.0046 (unverified for the US) | included | none: our worker joins the room | $0.001 track egress | Kinesis rate not found |
 | Recording, per min | $0.0025 plus storage | $0.002, storage free | unverified | free, storage free 90 days | ours | ours | $0.0028 |
@@ -50,7 +50,7 @@ Cost of one Copilot Call (estimate, no volume discounts, the stream billed once 
 Notes:
 
 - **Telnyx** is the cheapest managed option. Its stream carries both tracks, works in both directions (needed by the Inbound Agent in phase 3), and offers 16 kHz linear PCM, which the transcriber accepts without transcoding. Only one stream is allowed per Call [T6]. Its Growth plan gives 15% off for $2,000 a month of spend [T2]. I found no published concurrency limit.
-- **Telnyx in the EU** keeps stored data in the EU when Data Locality is set, but the docs call processing in the EU best-effort [T14]. ADR 0001 needs more than that. It is the open point in ADR 0020: written terms from Telnyx, or a second adapter for the EU Region (Twilio's Ireland region is the candidate).
+- **Telnyx in the EU** keeps stored data in the EU when Data Locality is set, but the docs call processing in the EU best-effort [T14]. ADR 0001 needs more than that. It is the open point in ADR 0027: written terms from Telnyx, or a second adapter for the EU Region (Twilio's Ireland region is the candidate).
 - **Twilio** has dual-channel recording (`RecordingChannels=dual`) [T8], a default of one call per second raisable to five [T12], and committed-use discounts through sales. Its Elastic SIP trunk is $0.0100 a minute outbound [T13].
 - **Plivo** includes streaming and recording, but I could not confirm its stream format, dual-channel recording or EU presence.
 - **Own media layer.** LiveKit and its SIP bridge on EC2 hosts (RTP and Fargate do not suit each other), with TURN, a worker fleet that forwards audio to the transcriber, and S3 for Recordings. LiveKit Cloud's Scale plan stops at 5,000 concurrent connections; above that it is Enterprise pricing [T5]. At 1,000,000 concurrent Calls, 60 million Call-minutes an hour at $0.007 is about $420,000 an hour (estimate); only carrier contracts with committed minutes reach that, and the media layer has to be ours.
@@ -171,7 +171,7 @@ Before retrieval (budget 1 ms):
 1. Only the Prospect's turns trigger. The Rep's turns update context only.
 2. Skip short or empty turns: fewer than about four words, or only a backchannel ("yeah", "mm-hmm", "right").
 3. Cool down: no new Suggestion for about 20 s after the last one, unless the turn is a question.
-4. Caps: at most about 30 Suggestions per Call-hour, and the per-Rep daily cap of ADR 0022.
+4. Caps: at most about 30 Suggestions per Call-hour, and the per-Rep daily cap of ADR 0029.
 5. Never suggest while the Rep is already speaking over the Prospect.
 
 After retrieval (budget 1 ms):
