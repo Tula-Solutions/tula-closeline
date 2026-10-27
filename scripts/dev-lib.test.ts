@@ -1308,7 +1308,23 @@ describe('Sign in with Google in the dev stack', () => {
       FAKE_GOOGLE_CLIENT_ID: FAKE_GOOGLE_CLIENT_ID,
       FAKE_GOOGLE_CLIENT_SECRET: FAKE_GOOGLE_CLIENT_SECRET,
       FAKE_GOOGLE_REDIRECT_URI: CALLBACK,
+      FAKE_GOOGLE_MAIL_REDIRECT_URI: 'http://127.0.0.1:3002/mailboxes/connect/callback',
     })
+  })
+
+  test('outbound sends Gmail Mailboxes to the fake, and to real Google never', () => {
+    const { outbound } = build()
+    expect(outbound.GOOGLE_CLIENT_ID).toBe(FAKE_GOOGLE_CLIENT_ID)
+    expect(outbound.GOOGLE_CLIENT_SECRET).toBe(FAKE_GOOGLE_CLIENT_SECRET)
+    expect(outbound.GOOGLE_AUTH_URL).toBe('http://127.0.0.1:3010/authorize')
+    expect(outbound.GOOGLE_TOKEN_URL).toBe('http://127.0.0.1:3010/token')
+    expect(outbound.GOOGLE_REVOKE_URL).toBe('http://127.0.0.1:3010/revoke')
+    expect(outbound.GMAIL_API_BASE_URL).toBe('http://127.0.0.1:3010')
+    expect(outbound.MAIL_OAUTH_REDIRECT_URI).toBe(
+      'http://127.0.0.1:3002/mailboxes/connect/callback'
+    )
+    const realEnv = build(real).outbound
+    expect(Object.keys(realEnv).filter((key) => /^(GOOGLE|GMAIL|MAIL_OAUTH)/.test(key))).toEqual([])
   })
 
   test('the fake and the redirect URI follow moved ports', () => {

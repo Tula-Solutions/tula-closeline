@@ -5,7 +5,7 @@ mailbox in Docker, then core, auth, the playbook, voice, outbound and the portal
 (hub issue 20); the mailbox and the end-to-end smoke test are hub issue 38.
 
 ```bash
-bun run dev           # compose up, migrate, start core, auth, the playbook, voice and the portal; Ctrl-C stops the five
+bun run dev           # compose up, migrate, start core, auth, the playbook, voice, outbound and the portal; Ctrl-C stops the six
 bun run dev:smoke     # in another terminal: signs up and checks the running stack over HTTP
 bun run dev --down    # stop the running stack (SIGTERM to its bun run dev, SIGKILL after 20 s), then the compose containers (keeps the data)
 bun run dev --down --volumes   # also delete the database and storage data
@@ -52,7 +52,7 @@ it should be, has no `node_modules`, or a port is taken.
 | core | `http://127.0.0.1:3100` | `bun src/server.ts` in `tula-closeline-core` |
 | auth | `http://127.0.0.1:3001` | `bun src/server.ts` in `tula-closeline-auth` |
 | playbook | `http://127.0.0.1:3003` | `bun src/server.ts` in `tula-closeline-playbook`: the API, the ingestion job loop (documents, Calls, Recordings, Deal imports) and the sweeps, all in this one process (see "The playbook" below) |
-| outbound | `http://127.0.0.1:3005` | `bun src/server.ts` in `tula-closeline-outbound`; health routes only so far |
+| outbound | `http://127.0.0.1:3005` | `bun src/server.ts` in `tula-closeline-outbound`; connects a Gmail Mailbox through the fake Google provider (see "Gmail Mailbox" below) |
 | voice | `http://127.0.0.1:3004` | `bun src/server.ts` in `tula-closeline-voice` with `TELEPHONY_PROVIDER=memory` (see "Voice" below) |
 | portal | `http://127.0.0.1:3002` | Vite dev server in `tula-closeline-portal` |
 | fake Google | `http://127.0.0.1:3010` | `bun scripts/dev-fake-google.ts` in this repo, started only when no `GOOGLE_*` is set in your shell (see "Sign in with Google" below) |
@@ -166,6 +166,27 @@ fake's `sub`, not Google's. Signing in later with the same email through real Go
 (ADR 0019 section 3: an account is matched by its `sub`, never by email). To switch, use a different
 email, or reset the local data with `bun run dev --down --volumes`.
 
+### Gmail Mailbox
+
+The same fake also plays Google for outbound's Gmail Mailbox, so a Mailbox can be connected, refreshed,
+revoked and sent through with no Google account. Besides the sign-in endpoints it serves, on loopback:
+
+- `POST /token` with `grant_type=refresh_token` (client id and secret checked; `invalid_grant` for an
+  unknown token). With `access_type=offline` at `/authorize` the code exchange also returns a refresh
+  token; without it, none;
+- `POST /revoke` (200 for a known token, 400 `invalid_token` otherwise; revoking a refresh token also
+  ends its access tokens);
+- `POST /gmail/v1/users/me/messages/send` (Bearer must be a live access token, body `{raw, threadId?}`).
+  The message is kept in memory, headers only (never the body);
+- `GET /fake/sent` lists what was sent (`from`, `to`, `subject`, `id`, `threadId`, `at`, `bytes`).
+
+With the fake, `bun run dev` gives outbound `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` (fixed,
+not-for-deploys values), `GOOGLE_AUTH_URL`, `GOOGLE_TOKEN_URL` and `GOOGLE_REVOKE_URL` on the fake,
+`GMAIL_API_BASE_URL` (the fake's origin) and `MAIL_OAUTH_REDIRECT_URI`
+(`http://127.0.0.1:3002/mailboxes/connect/callback`, on the portal origin). The fake accepts that
+redirect URI as well as the sign-in one (`FAKE_GOOGLE_MAIL_REDIRECT_URI`). With real Google none of
+these is passed, so outbound keeps its in-memory Mailbox provider.
+
 `bun run dev:smoke` covers the fake provider (see below) and skips the Google steps, with the
 reason, when the stack uses real Google or has Google off.
 
@@ -192,7 +213,7 @@ reason, when the stack uses real Google or has Google off.
 
 Each child's output is prefixed (`[core]`, `[auth]`, `[playbook]`, `[voice]`, `[portal]`) and scrubbed of this run's
 secrets. If one exits, or any step after the first spawn fails, the others are stopped and the
-script exits 1. On Ctrl-C, SIGTERM or SIGHUP it stops the five services and leaves compose
+script exits 1. On Ctrl-C, SIGTERM or SIGHUP it stops the six services and leaves compose
 running, so the next start is quick. A second signal while a start-up step is still stopping kills
 that step's process (SIGKILL) instead of waiting for it, and says so; a third does nothing. Once
 the services run, signals belong to the supervisor, and a signal during shutdown prints no
@@ -257,6 +278,7 @@ the stack and runs `bun run dev:smoke --strict`, a person runs it.
 | a second sign-up cannot read the first Organization | a second, different user gets a different Organization id. Reads: `GET /v1/organization`, `/v1/members`, `/v1/invitations` and `/v1/teams` with their token return nothing of the first (its Organization id, address, user and membership ids, Invitation and Team ids). The first Organization id sent in an `x-organization-id` header or an `organizationId` query with the second token is ignored or refused. Writes by id with the second token against the first Organization (`DELETE /v1/invitations/{id}`, `PATCH` and `DELETE /v1/teams/{id}`, `POST /v1/teams/{id}/members`, `PATCH /v1/members/{id}`, `POST /v1/invitations` with its `teamId`) each answer `404` with the documented code (`invitation.not_found`, `team.not_found`, `member.not_found`), and the first Organization is unchanged. Positive control: the first user then renames and deletes their own Team and revokes their own Invitation, so a route that answers `404` to everyone fails |
 | **Sales history** (below): confirm the rights wording; upload a Transcript; the first Call created its Deal, open; the Transcript is processed into Moments; upload a Recording; the Recording is transcribed; import a three-row Deal CSV; the import is applied; the Outcome reaches the Moments; a second Organization cannot see any of it; delete the Call and it is gone | the playbook, as the Owner, through its public routes only |
 | **Sign in with Google** (nine steps, `google: ...`): `auth-options` says Google is on; `start` returns an authorization URL on the fake provider; the provider's page is served; approving a fresh email redirects to the portal's callback; the callback through the portal sends a new person to `/sign-up/google?attempt=`; `complete` with an Organization name (sending the attempt cookie and the portal's `Origin`) gives a session and a refresh cookie; `/v1/client/me` shows the person; a second sign-in with the same email goes straight to the app with a refresh cookie; a replayed callback goes to `/sign-in?error=oidc.state_invalid` | auth's Google routes end to end against `scripts/dev-fake-google.ts`, playing the browser. Only a URL on the fake provider's own address is followed. If Google is off, or the stack uses real Google (which needs a person), the steps are skipped with the reason, so `--strict` fails |
+| **Mailbox** (two steps, `mailbox: ...`): connecting a Gmail Mailbox through the fake provider (`POST /v1/mailboxes/connect`, approve at the fake, the redirect goes to the portal, `connect/complete` gives a Mailbox); a test message sent through it (`POST /v1/mailboxes/{id}/test-send`) shows up in `GET /fake/sent` | outbound's Mailbox routes against the fake Gmail. Skipped with the reason when outbound or the fake is not in use (real Google). The send is skipped, so `--strict` fails, while outbound answers 404 on the test-send route (it ships after the Mailbox change) |
 | **Voice Lines** (`voice: ...`): an Owner buys a Line (`POST /v1/lines`, `Idempotency-Key`) and finds it in `GET /v1/lines`; a second Organization lists none of the first's Lines and gets `404 line.not_found` reading one by id | voice, through its public routes only, with the tokens from the earlier steps (skipped if the second Organization was not created) |
 | a replayed refresh token is refused and ends its session | last, on a throwaway sign-in: refresh twice, replay the first token, expect `401 session.reuse_detected`, then expect the newest token to be refused too (the contract says reuse ends the whole session) |
 

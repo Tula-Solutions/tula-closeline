@@ -8,6 +8,7 @@
 // link or address is printed: every message is scrubbed of the values this run has seen.
 import { origins, randomHex, requestWithRetry, resolvePorts } from './dev-lib.ts'
 import { runGoogleSteps } from './dev-smoke-google.ts'
+import { runMailboxSteps } from './dev-smoke-mailbox.ts'
 
 /** How a step ended. */
 export type StepStatus = 'pass' | 'fail' | 'skip'
@@ -21,6 +22,8 @@ export type SmokeTargets = {
   core: string
   playbook: string
   voice: string
+  /** Outbound; without it the Mailbox steps are skipped. */
+  outbound?: string
   portal: string
   mail: string
   /** The fake Google provider; without it the Google steps cannot tell the fake from real Google. */
@@ -1871,6 +1874,19 @@ export async function runSmoke(
       )
     }
     return pass('an empty list, and the first Organization Line answers 404 line.not_found')
+  })
+
+  // Gmail Mailbox through the fake provider, as the signed-in Owner.
+  await runMailboxSteps({
+    targets,
+    request,
+    step: async (name, body) => {
+      await step(name, body)
+      return results.at(-1)?.status ?? 'fail'
+    },
+    remember,
+    runId,
+    accessToken: state.session?.accessToken,
   })
 
   // Sign in with Google, against the stack's fake provider. Independent of the account steps.

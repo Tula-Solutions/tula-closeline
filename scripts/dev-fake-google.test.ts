@@ -10,6 +10,7 @@ import {
 } from './dev-fake-google.ts'
 
 const REDIRECT = 'http://127.0.0.1:3002/v1/client/google/callback'
+const MAIL_REDIRECT = 'http://127.0.0.1:3002/mailboxes/connect/callback'
 const VERIFIER = 'v'.repeat(64)
 const CHALLENGE = createHash('sha256').update(VERIFIER).digest('base64url')
 
@@ -21,6 +22,7 @@ beforeAll(async () => {
     clientId: FAKE_GOOGLE_CLIENT_ID,
     clientSecret: FAKE_GOOGLE_CLIENT_SECRET,
     redirectUri: REDIRECT,
+    mailRedirectUri: MAIL_REDIRECT,
   })
 })
 afterAll(() => fake.stop())
@@ -203,5 +205,137 @@ describe('the fake Google provider', () => {
 
   test('unknown paths are 404', async () => {
     expect((await fetch(`${fake.issuer}/nothing`)).status).toBe(404)
+  })
+})
+
+describe('the fake Google provider as a Gmail Mailbox provider', () => {
+  const offline = { access_type: 'offline', redirect_uri: MAIL_REDIRECT }
+
+  async function connect(email: string) {
+    const code = await approveAt(email, offline)
+    const body = (await (
+      await exchange(tokenBody(code, { redirect_uri: MAIL_REDIRECT }))
+    ).json()) as Record<string, unknown>
+    return body
+  }
+
+  /** Approves with the mail redirect and returns the code (the shared helper checks REDIRECT). */
+  async function approveAt(email: string, overrides: Record<string, string>): Promise<string> {
+    const form = authorizeParams(overrides)
+    form.set('email', email)
+    const response = await fetch(`${fake.issuer}/authorize`, {
+      method: 'POST',
+      body: form,
+      redirect: 'manual',
+    })
+    expect(response.status).toBe(302)
+    const back = new URL(response.headers.get('location') ?? '')
+    expect(`${back.origin}${back.pathname}`).toBe(MAIL_REDIRECT)
+    return back.searchParams.get('code') ?? ''
+  }
+
+  const raw = (headers: string, body = 'hello') =>
+    Buffer.from(`${headers}\r\n\r\n${body}`).toString('base64url')
+  const post = (path: string, init: RequestInit) =>
+    fetch(`${fake.issuer}${path}`, { method: 'POST', ...init })
+
+  test('access_type=offline returns a refresh token and an ID token with the Gmail claims', async () => {
+    const body = await connect('Rep@Example.com')
+    expect(body.refresh_token).toEqual(expect.any(String))
+    expect(body.access_token).toEqual(expect.any(String))
+    expect(body.expires_in).toBe(3600)
+    expect(claimsOf(body.id_token as string)).toMatchObject({
+      email: 'rep@example.com',
+      email_verified: true,
+      name: 'rep',
+    })
+  })
+
+  test('without access_type=offline there is no refresh token (sign-in is unchanged)', async () => {
+    const code = await approve('plain@example.com')
+    const body = (await (await exchange(tokenBody(code))).json()) as Record<string, unknown>
+    expect(body.refresh_token).toBeUndefined()
+  })
+
+  test('the refresh_token grant gives a new access token to the right client only', async () => {
+    const { refresh_token: refreshToken } = await connect('refresh@example.com')
+    const grant = (overrides: Record<string, string> = {}) =>
+      post('/token', {
+        body: new URLSearchParams({
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken as string,
+          client_id: FAKE_GOOGLE_CLIENT_ID,
+          client_secret: FAKE_GOOGLE_CLIENT_SECRET,
+          ...overrides,
+        }),
+      })
+    const ok = await grant()
+    expect(ok.status).toBe(200)
+    expect(((await ok.json()) as Record<string, unknown>).access_token).toEqual(expect.any(String))
+    expect((await grant({ client_secret: 'wrong' })).status).toBe(400)
+    const unknown = await grant({ refresh_token: 'fake-rt-unknown' })
+    expect(unknown.status).toBe(400)
+    expect(((await unknown.json()) as { error: string }).error).toBe('invalid_grant')
+  })
+
+  test('revoke ends the refresh token and its access tokens; a repeat is 400', async () => {
+    const { refresh_token: refreshToken, access_token: accessToken } =
+      await connect('revoke@example.com')
+    const revoke = (token: string) => post('/revoke', { body: new URLSearchParams({ token }) })
+    expect((await revoke(refreshToken as string)).status).toBe(200)
+    expect((await revoke(refreshToken as string)).status).toBe(400)
+    const sendNow = await post('/gmail/v1/users/me/messages/send', {
+      headers: { authorization: `Bearer ${accessToken}` },
+      body: JSON.stringify({ raw: raw('To: a@b.test') }),
+    })
+    expect(sendNow.status).toBe(401)
+    const refresh = await post('/token', {
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken as string,
+        client_id: FAKE_GOOGLE_CLIENT_ID,
+        client_secret: FAKE_GOOGLE_CLIENT_SECRET,
+      }),
+    })
+    expect(refresh.status).toBe(400)
+  })
+
+  test('send keeps the message in memory and lists its headers, never the body', async () => {
+    const { access_token: accessToken } = await connect('sender@example.com')
+    const sent = await post('/gmail/v1/users/me/messages/send', {
+      headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        raw: raw(
+          'From: sender@example.com\r\nTo: prospect@example.test\r\nSubject: Hi there',
+          'SECRET-BODY'
+        ),
+        threadId: 'thread-1',
+      }),
+    })
+    expect(sent.status).toBe(200)
+    expect(await sent.json()).toMatchObject({ id: expect.any(String), threadId: 'thread-1' })
+    const listing = await (await fetch(`${fake.issuer}/fake/sent`)).text()
+    expect(JSON.parse(listing).messages.at(-1)).toMatchObject({
+      from: 'sender@example.com',
+      to: 'prospect@example.test',
+      subject: 'Hi there',
+    })
+    expect(listing).not.toContain('SECRET-BODY')
+  })
+
+  test('send refuses a missing or unknown token and an empty message', async () => {
+    const { access_token: accessToken } = await connect('bad@example.com')
+    const attempt = (headers: Record<string, string>, body: unknown) =>
+      post('/gmail/v1/users/me/messages/send', { headers, body: JSON.stringify(body) })
+    expect((await attempt({}, { raw: raw('To: a@b.test') })).status).toBe(401)
+    expect((await attempt({ authorization: 'Bearer nope' }, { raw: 'x' })).status).toBe(401)
+    expect((await attempt({ authorization: `Bearer ${accessToken}` }, {})).status).toBe(400)
+  })
+
+  test('the mail redirect URI is accepted and an unregistered one is not', async () => {
+    const bad = authorizeParams({ redirect_uri: 'http://127.0.0.1:3002/other' })
+    expect((await fetch(`${fake.issuer}/authorize?${bad}`)).status).toBe(400)
+    const good = authorizeParams({ redirect_uri: MAIL_REDIRECT })
+    expect((await fetch(`${fake.issuer}/authorize?${good}`)).status).toBe(200)
   })
 })

@@ -464,6 +464,13 @@ export function origins(ports: Ports): {
 /** The path Google sends the browser back to; auth requires the redirect URI to end in it. */
 export const GOOGLE_CALLBACK_PATH = '/v1/client/google/callback'
 
+/** Where the portal receives the redirect back from the provider when a Mailbox is connected. */
+export const MAIL_CALLBACK_PATH = '/mailboxes/connect/callback'
+
+function mailRedirectUri(portal: string): string {
+  return `${portal}${MAIL_CALLBACK_PATH}`
+}
+
 /** How auth is configured for Sign in with Google: the fake provider, or the developer's own. */
 export type GoogleSetup =
   | { kind: 'fake'; redirectUri: string }
@@ -681,6 +688,19 @@ export function buildStackEnv(options: {
       // Where the enrichment waterfall reads a Prospect and writes enriched fields back.
       CORE_URL: where.core,
       CORE_INTERNAL_SECRET: secrets.outboundCoreToken,
+      // Gmail Mailboxes go to the fake provider (loopback only); with real Google set for auth's
+      // sign-in, outbound keeps its in-memory Mailbox provider, as its redirect URI is not Google's.
+      ...(google.kind === 'fake'
+        ? {
+            GOOGLE_CLIENT_ID: FAKE_GOOGLE_CLIENT_ID,
+            GOOGLE_CLIENT_SECRET: FAKE_GOOGLE_CLIENT_SECRET,
+            GOOGLE_AUTH_URL: `${where.fakeGoogle}/authorize`,
+            GOOGLE_TOKEN_URL: `${where.fakeGoogle}/token`,
+            GOOGLE_REVOKE_URL: `${where.fakeGoogle}/revoke`,
+            GMAIL_API_BASE_URL: where.fakeGoogle,
+            MAIL_OAUTH_REDIRECT_URI: mailRedirectUri(where.portal),
+          }
+        : {}),
     },
     portal: {
       ...base,
@@ -705,6 +725,7 @@ export function buildStackEnv(options: {
             FAKE_GOOGLE_CLIENT_ID,
             FAKE_GOOGLE_CLIENT_SECRET,
             FAKE_GOOGLE_REDIRECT_URI: google.redirectUri,
+            FAKE_GOOGLE_MAIL_REDIRECT_URI: mailRedirectUri(where.portal),
           }
         : undefined,
   }
