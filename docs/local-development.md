@@ -388,7 +388,8 @@ With `--tunnel` the script checks all of that first and stops with one line if T
 Funnel is not enabled or the host differs. It then maps `/webhooks/twilio` to voice and `/` to the
 portal (which proxies to the services), waits until `https://<host>/` answers (the first public DNS
 lookup can take a minute), and runs `tailscale serve reset` when the stack stops, however it
-stops, so nothing stays public. After a kill -9, run `tailscale serve reset` by hand. Without
+stops, so nothing stays public. `--tunnel` owns this machine's whole Serve and Funnel config: it clears
+it at start and at stop, including mappings you made yourself. After a kill -9, run `tailscale serve reset` by hand. Without
 `--tunnel` nothing changes.
 
 Register these under the host:
