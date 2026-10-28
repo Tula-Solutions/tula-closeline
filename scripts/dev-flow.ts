@@ -261,7 +261,7 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
   try {
     const loaded =
       ctx.infisical && deps.exportSecrets
-        ? await loadInfisical(deps.exportSecrets, deps.say)
+        ? await loadInfisical(deps.exportSecrets, deps.say, abort)
         : undefined
     if (stopped()) {
       return failed()

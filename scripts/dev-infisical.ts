@@ -14,7 +14,10 @@ export const FOLDERS = ['hub', 'auth', 'core', 'playbook', 'voice', 'outbound', 
 export type Folder = (typeof FOLDERS)[number]
 
 /** Runs `infisical export` for a folder and returns its JSON, or undefined if it failed. */
-export type Exporter = (folder: Folder) => Promise<string | undefined>
+export type Exporter = (
+  folder: Folder,
+  abort?: { signal: AbortSignal; force: AbortSignal }
+) => Promise<string | undefined>
 
 /** What Infisical holds: the non-empty values, and the names of the keys left empty, per folder. */
 export type Loaded = {
@@ -60,12 +63,13 @@ function parseExport(raw: string): { key: string; value: string }[] | undefined 
  */
 export async function loadInfisical(
   exporter: Exporter,
-  say: (line: string) => void
+  say: (line: string) => void,
+  abort?: { signal: AbortSignal; force: AbortSignal }
 ): Promise<Loaded | undefined> {
   const values = {} as Loaded['values']
   const empty = {} as Loaded['empty']
   for (const folder of FOLDERS) {
-    const raw = await exporter(folder)
+    const raw = await exporter(folder, abort)
     const rows = raw === undefined ? undefined : parseExport(raw)
     if (rows === undefined) {
       say(
@@ -111,8 +115,11 @@ export function infisicalParent(
       out[name] = value
     }
   }
-  for (const name of GOOGLE_KEYS) {
-    take(name, loaded.values.auth[name])
+  // All three from one source: a shell that sets any of them keeps the whole set.
+  if (GOOGLE_KEYS.every((name) => out[name] === undefined || out[name] === '')) {
+    for (const name of GOOGLE_KEYS) {
+      take(name, loaded.values.auth[name])
+    }
   }
   take('CLOSELINE_DEV_PUBLIC_ORIGIN', loaded.values.hub.CLOSELINE_DEV_PUBLIC_ORIGIN)
   return out
@@ -158,9 +165,12 @@ export function vendorReport(loaded: Loaded | undefined): string {
 }
 
 /** Runs `infisical export` in the hub (the CLI finds `.infisical.json` there); undefined on any failure. */
-export function infisicalExporter(folder: Folder): Promise<string | undefined> {
+export function infisicalExporter(
+  folder: Folder,
+  abort?: { signal: AbortSignal; force: AbortSignal }
+): Promise<string | undefined> {
   const env = Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
   )
-  return captureCommand(exportCommand(folder), { cwd: hub, env, timeoutMs: 30_000 })
+  return captureCommand(exportCommand(folder), { cwd: hub, env, timeoutMs: 30_000, ...abort })
 }

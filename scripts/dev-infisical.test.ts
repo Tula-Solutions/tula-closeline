@@ -134,6 +134,15 @@ describe('using the values', () => {
     expect(parent.CLOSELINE_DEV_PUBLIC_ORIGIN).toBe('https://x.example.com')
   })
 
+  test('a shell that sets one Google key keeps all three from the shell', async () => {
+    const loaded = await must(
+      fakeExporter({ auth: { GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b' } })
+    )
+    const parent = infisicalParent({ GOOGLE_REDIRECT_URI: 'shell' }, loaded)
+    expect(parent.GOOGLE_CLIENT_ID).toBeUndefined()
+    expect(parent.GOOGLE_CLIENT_SECRET).toBeUndefined()
+  })
+
   test('values are scrubbed from messages', async () => {
     const loaded = await must(full)
     expect(scrub(`bad ${GOOGLE_SECRET} and ${TWILIO}`, loaded)).toBe(

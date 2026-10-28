@@ -974,3 +974,23 @@ describe('runUp with Infisical', () => {
     expect(h.failed.join('\n')).not.toContain('leaky.example')
   })
 })
+
+describe('runUp stops while Infisical is being read', () => {
+  test('a signal reaches the exporter, which is cut short', async () => {
+    let seen: AbortSignal | undefined
+    const h = harness({
+      infisical: true,
+      exportSecrets: (_folder, abort) => {
+        seen = abort?.signal
+        return new Promise((resolve) =>
+          abort?.signal.addEventListener('abort', () => resolve(undefined))
+        )
+      },
+    })
+    const run = runUp(h.context, h.deps)
+    await Bun.sleep(10)
+    h.signal()
+    expect(await run).toBe(INTERRUPTED)
+    expect(seen?.aborted).toBe(true)
+  })
+})
