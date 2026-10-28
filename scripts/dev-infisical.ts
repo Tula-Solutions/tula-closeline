@@ -36,6 +36,14 @@ const GENERATED =
   /^(DATABASE_URL|INTERNAL_API_TOKENS|AUTH_MASTER_KEY|ENVIRONMENT)$|(POSTGRES|DB|DATABASE)_PASSWORD$|_INTERNAL_(TOKEN|SECRET)$/
 
 const GOOGLE_KEYS = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REDIRECT_URI'] as const
+/** What voice refuses to start on Twilio without. */
+const TWILIO_KEYS = [
+  'TWILIO_ACCOUNT_SID',
+  'TWILIO_API_KEY_SID',
+  'TWILIO_API_KEY_SECRET',
+  'TWILIO_AUTH_TOKEN',
+  'TWILIO_TWIML_APP_SID',
+] as const
 
 /** The `infisical export` command line for a folder. */
 export function exportCommand(folder: Folder): string[] {
@@ -173,13 +181,28 @@ export function applyInfisical(
     }
     const env = { ...stack[folder] }
     for (const [key, value] of Object.entries(loaded.values[folder])) {
-      if (key in DERIVED) {
+      if (folder === 'voice' && key === 'TELEPHONY_PROVIDER' && value === 'twilio') {
+        // Twilio must reach voice's webhooks, so real calls need the tunnel's public origin.
+        const missing = TWILIO_KEYS.filter((name) => !loaded.values.voice[name])
+        if (missing.length > 0) {
+          say(`Infisical /voice: Twilio needs ${missing.join(', ')}; voice keeps its stand-in`)
+        } else if (tunnel) {
+          env.TELEPHONY_PROVIDER = 'twilio'
+          env.WEBHOOK_BASE_URL = base
+        } else {
+          say(
+            'Infisical /voice: Twilio needs --tunnel to reach its webhooks; voice keeps its stand-in'
+          )
+        }
+      } else if (key in DERIVED) {
         const derived = DERIVED[key]?.(base, tunnel)
         if (derived !== undefined) {
           env[key] = derived
         }
       } else if (GENERATED.test(key) || (env[key] !== undefined && env[key] !== value)) {
-        say(`Infisical /${folder}: ${key} is set by this script and is ignored`)
+        say(
+          `Infisical /${folder}: ${key} is set by this script and is ignored${key === 'TELEPHONY_PROVIDER' ? " (only 'twilio' switches it)" : ''}`
+        )
       } else {
         env[key] = value
       }

@@ -36,6 +36,7 @@ import {
   siblingDir,
   TIMEOUTS,
   unrotatedLoginRoles,
+  voiceLabel,
   type WiringResult,
 } from './dev-lib.ts'
 import { startTunnel, type Tailscale, type Tunnel } from './dev-tunnel.ts'
@@ -543,9 +544,7 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
         deps.say(`auth    ${where.auth}`)
         deps.say(`core    ${where.core}`)
         deps.say(`playbook ${where.playbook}  (API and workers in one process)`)
-        deps.say(
-          `voice   ${where.voice}  (Lines; numbers come from an in-memory stand-in, never Twilio)`
-        )
+        deps.say(`voice   ${where.voice}  (${voiceLabel(stack.voice.TELEPHONY_PROVIDER)})`)
         deps.say(
           `outbound ${where.outbound}  (Mailbox through the fake Google when outbound has it)`
         )

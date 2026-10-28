@@ -107,6 +107,10 @@ so no real Twilio account, number or charge is involved, and Lines disappear whe
 (their rows stay in the database). It gets the auth JWKS settings and no queue, storage or vendor
 setting.
 
+For real calls, set `TELEPHONY_PROVIDER=twilio` and the `TWILIO_*` keys in Infisical dev `/voice` and
+start with `--tunnel`: voice then uses Twilio and `WEBHOOK_BASE_URL` is the tunnel origin. Without
+`--tunnel` Twilio could not reach the webhooks, so voice keeps its stand-in and the script says so.
+
 **The portal reaches the playbook through its dev server.** The portal calls only its own origin; its
 dev server proxies `/v1/client` to auth, `/v1/organization`, `/v1/members`, `/v1/invitations` and
 `/v1/teams` to core, `/v1/playbook` to the playbook and `/v1/lines` to voice. The script gives it the four targets the
