@@ -23,5 +23,6 @@ labelled `ready-for-agent` and `repo:<short>`, with blocking edges.
 | M14 | [Inbound Agent](m14-inbound-agent.md) | 3 | #223 | 20 |
 | M15 | [Analytics, assessments and learning](m15-analytics-assessments-learning.md) | 5 | #122 | 13 |
 | M16 | [Agent controls, audit and openness](m16-agent-controls-audit-openness.md) | 5 | #123 | 15 |
+| M17 | [Outbound Agent call](m17-outbound-agent-call.md) | 4 | #491 | 16 |
 
 The issues are the working copy. Change a ticket on GitHub. Change a spec here and in its issue.
