@@ -544,7 +544,11 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
         deps.say(`core    ${where.core}`)
         deps.say(`playbook ${where.playbook}  (API and workers in one process)`)
         deps.say(
-          `voice   ${where.voice}  (Lines; numbers come from an in-memory stand-in, never Twilio)`
+          `voice   ${where.voice}  (${
+            stack.voice.TELEPHONY_PROVIDER === 'twilio'
+              ? 'real Twilio: calls and numbers cost money'
+              : 'Lines; numbers come from an in-memory stand-in, never Twilio'
+          })`
         )
         deps.say(
           `outbound ${where.outbound}  (Mailbox through the fake Google when outbound has it)`
