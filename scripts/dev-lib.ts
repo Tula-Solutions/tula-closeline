@@ -100,15 +100,16 @@ export function resolvePorts(env: Record<string, string | undefined>): Ports {
 
 /** What the command line asked for. */
 export type Args =
-  | { kind: 'up' }
+  | { kind: 'up'; infisical: boolean }
   | { kind: 'down'; volumes: boolean }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 
-/** Parses `dev.ts` arguments: none (start), `--down`, `--down --volumes`, or `--help`. */
+/** Parses `dev.ts` arguments: none (start), `--no-infisical`, `--down`, `--down --volumes`, or `--help`. */
 export function parseArgs(argv: readonly string[]): Args {
   let down = false
   let volumes = false
+  let infisical = true
   for (const arg of argv) {
     if (arg === '--help' || arg === '-h') {
       return { kind: 'help' }
@@ -117,6 +118,8 @@ export function parseArgs(argv: readonly string[]): Args {
       down = true
     } else if (arg === '--volumes') {
       volumes = true
+    } else if (arg === '--no-infisical') {
+      infisical = false
     } else {
       return { kind: 'error', message: `unknown argument: ${arg}` }
     }
@@ -124,7 +127,7 @@ export function parseArgs(argv: readonly string[]): Args {
   if (volumes && !down) {
     return { kind: 'error', message: '--volumes only makes sense with --down' }
   }
-  return down ? { kind: 'down', volumes } : { kind: 'up' }
+  return down ? { kind: 'down', volumes } : { kind: 'up', infisical }
 }
 
 /** Lower-case hex of `bytes` random bytes from the operating system's secure generator. */

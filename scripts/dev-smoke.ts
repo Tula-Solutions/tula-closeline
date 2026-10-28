@@ -6,6 +6,9 @@
 // code and the Invitation link are read from the local mailbox (Mailpit) that auth and core send
 // to; the services have no other way in for the test and none is added. No code, token, password,
 // link or address is printed: every message is scrubbed of the values this run has seen.
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { infisicalExporter, loadInfisical, vendorReport } from './dev-infisical.ts'
 import { origins, randomHex, requestWithRetry, resolvePorts } from './dev-lib.ts'
 import { runBookingSteps } from './dev-smoke-booking.ts'
 import { runGoogleSteps } from './dev-smoke-google.ts'
@@ -2032,6 +2035,13 @@ if (import.meta.main) {
     process.exit(2)
   }
   const targets = origins(resolvePorts(process.env))
+  // What Infisical holds, by key name only: which vendors are real and which stay faked.
+  if (existsSync(join(import.meta.dir, '..', '.infisical.json'))) {
+    const loaded = await loadInfisical(infisicalExporter, (line) =>
+      process.stdout.write(`${line}\n`)
+    )
+    process.stdout.write(`${vendorReport(loaded)}\n`)
+  }
   const results = await runSmoke(targets)
   for (const result of results) {
     process.stdout.write(`${formatResult(result)}\n`)
