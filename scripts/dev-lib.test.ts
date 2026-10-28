@@ -288,7 +288,8 @@ describe('buildStackEnv', () => {
       'http://127.0.0.1:3002,https://quiet-fox-1.trycloudflare.com'
     )
     expect(env.portal.PORTAL_DEV_ALLOWED_HOSTS).toBe('quiet-fox-1.trycloudflare.com')
-    expect(env.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:3002')
+    // Links in emails (an Invitation) must open from anywhere, so they use the public origin.
+    expect(env.core.PORTAL_BASE_URL).toBe('https://quiet-fox-1.trycloudflare.com')
   })
 
   test('a public origin with a port keeps the port for auth and drops it for the host', () => {

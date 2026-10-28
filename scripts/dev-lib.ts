@@ -653,7 +653,8 @@ export function buildStackEnv(options: {
       // Where core reads a Call's assessments from voice; it sends its own secret.
       VOICE_INTERNAL_URL: where.voice,
       VOICE_INTERNAL_TOKEN: secrets.coreVoiceToken,
-      PORTAL_BASE_URL: where.portal,
+      // The links core emails (an Invitation) open from anywhere when a tunnel is up.
+      PORTAL_BASE_URL: publicOrigin?.origin ?? where.portal,
       MAIL_LOCAL_URL: where.mail,
       UNSUBSCRIBE_TOKEN_KEY: secrets.unsubscribeTokenKey,
       // The queue stand-in of the compose file; it ignores the credentials, but the AWS SDK will

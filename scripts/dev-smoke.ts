@@ -36,6 +36,8 @@ export type SmokeTargets = {
   /** Outbound; without it the Mailbox steps are skipped. */
   outbound?: string
   portal: string
+  /** Auth itself, for what the portal does not proxy (readiness, signing keys); defaults to `auth`. */
+  authDirect?: string
   mail: string
   /** The fake Google provider; without it the Google steps cannot tell the fake from real Google. */
   fakeGoogle?: string
@@ -354,7 +356,7 @@ export async function runSmoke(
   }
 
   await step('auth is ready', async () => {
-    const response = await request(`${targets.auth}/readyz`)
+    const response = await request(`${targets.authDirect ?? targets.auth}/readyz`)
     return response.status === 200 ? pass() : fail(`GET /readyz answered ${response.status}`)
   })
 
@@ -447,7 +449,7 @@ export async function runSmoke(
   })
 
   await step('auth publishes its signing keys', async () => {
-    const found = await call('GET', `${targets.auth}/.well-known/jwks.json`)
+    const found = await call('GET', `${targets.authDirect ?? targets.auth}/.well-known/jwks.json`)
     const keys = pick(found.json, 'keys')
     if (found.status !== 200 || !Array.isArray(keys) || keys.length === 0) {
       return fail(`GET /.well-known/jwks.json answered ${found.status} with no keys`)
@@ -2067,7 +2069,10 @@ if (import.meta.main) {
     process.exit(2)
   }
   // Through the tunnel the browser path is the portal origin: sign-up and sign-in go through its proxy.
-  const through = args.tunnel && publicOrigin ? { portal: publicOrigin, auth: publicOrigin } : {}
+  const through =
+    args.tunnel && publicOrigin
+      ? { portal: publicOrigin, auth: publicOrigin, authDirect: targets.auth }
+      : {}
   const results = await runSmoke({ ...targets, ...through })
   if (args.tunnel && publicOrigin) {
     results.push(await twilioWebhookStep(publicOrigin))
