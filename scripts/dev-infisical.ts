@@ -173,7 +173,17 @@ export function applyInfisical(
     }
     const env = { ...stack[folder] }
     for (const [key, value] of Object.entries(loaded.values[folder])) {
-      if (key in DERIVED) {
+      if (folder === 'voice' && key === 'TELEPHONY_PROVIDER' && value === 'twilio') {
+        // Twilio must reach voice's webhooks, so real calls need the tunnel's public origin.
+        if (tunnel) {
+          env.TELEPHONY_PROVIDER = 'twilio'
+          env.WEBHOOK_BASE_URL = base
+        } else {
+          say(
+            'Infisical /voice: Twilio needs --tunnel to reach its webhooks; voice keeps its stand-in'
+          )
+        }
+      } else if (key in DERIVED) {
         const derived = DERIVED[key]?.(base, tunnel)
         if (derived !== undefined) {
           env[key] = derived

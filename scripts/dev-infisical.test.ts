@@ -102,6 +102,32 @@ describe('using the values', () => {
     expect(next.core.TWILIO_AUTH_TOKEN).toBeUndefined()
   })
 
+  test('Twilio in /voice with the tunnel switches voice to Twilio and its webhooks to the tunnel', async () => {
+    const loaded = await must(
+      fakeExporter({ voice: { TELEPHONY_PROVIDER: 'twilio', TWILIO_AUTH_TOKEN: TWILIO } })
+    )
+    const memory = { ...stack, voice: { TELEPHONY_PROVIDER: 'memory' } }
+    const tunnel = {
+      parent: { CLOSELINE_DEV_PUBLIC_ORIGIN: 'https://box.example.ts.net' },
+      portalOrigin: PORTAL,
+    }
+    const next = applyInfisical(memory, loaded, () => {}, tunnel)
+    expect(next.voice.TELEPHONY_PROVIDER).toBe('twilio')
+    expect(next.voice.WEBHOOK_BASE_URL).toBe('https://box.example.ts.net')
+  })
+
+  test('Twilio in /voice without the tunnel keeps the stand-in and says why', async () => {
+    const loaded = await must(
+      fakeExporter({ voice: { TELEPHONY_PROVIDER: 'twilio', TWILIO_AUTH_TOKEN: TWILIO } })
+    )
+    const said: string[] = []
+    const memory = { ...stack, voice: { TELEPHONY_PROVIDER: 'memory' } }
+    const next = applyInfisical(memory, loaded, (l) => said.push(l), local)
+    expect(next.voice.TELEPHONY_PROVIDER).toBe('memory')
+    expect(next.voice.WEBHOOK_BASE_URL).toBeUndefined()
+    expect(said.join('\n')).toContain('--tunnel')
+  })
+
   test('a generated key is refused, naming the key and never the value', async () => {
     const loaded = await must(
       fakeExporter({
