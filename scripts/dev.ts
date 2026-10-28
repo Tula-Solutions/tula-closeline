@@ -1,8 +1,9 @@
 // Runs the Closeline stack on this machine: `bun run dev`. See docs/local-development.md.
 // This file only parses the arguments and wires the real effects into the flow in dev-flow.ts.
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { type FlowContext, type FlowDeps, runDown, runUp } from './dev-flow.ts'
+import { infisicalExporter } from './dev-infisical.ts'
 import {
   acquireStartLock,
   buildStackEnv,
@@ -26,9 +27,10 @@ import {
 
 const hub = resolve(import.meta.dir, '..')
 
-const USAGE = `usage: bun run dev [--down [--volumes]]
+const USAGE = `usage: bun run dev [--no-infisical] [--down [--volumes]]
 
   (no flags)         start the stack and the four services; Ctrl-C stops the services
+  --no-infisical     do not read vendor secrets from Infisical (also skipped without .infisical.json)
   --down             stop the running stack (the bun run dev process and its services), then the compose containers
   --down --volumes   also delete the dev stack's volumes (database and storage data)
 
@@ -64,6 +66,7 @@ export function createDeps(): FlowDeps {
         queueConfig: readFileSync(join(hub, 'scripts/dev/elasticmq.conf'), 'utf8'),
       }),
     secrets: generateSecrets(),
+    exportSecrets: infisicalExporter,
     salt: freshSalt,
     subscribe: (onSignal) => {
       for (const signal of STOP_SIGNALS) {
@@ -83,7 +86,11 @@ export function createDeps(): FlowDeps {
 }
 
 /** Where the flow runs: the hub, the clones, the ports, and the environment it was started with. */
-export function createContext(env: Record<string, string | undefined>, ports: Ports): FlowContext {
+export function createContext(
+  env: Record<string, string | undefined>,
+  ports: Ports,
+  infisical = false
+): FlowContext {
   return {
     hub,
     composeFile: join(hub, 'compose.dev.yaml'),
@@ -91,6 +98,7 @@ export function createContext(env: Record<string, string | undefined>, ports: Po
     ports,
     parentEnv: env,
     execPath: process.execPath,
+    infisical: infisical && existsSync(join(hub, '.infisical.json')),
   }
 }
 
@@ -112,7 +120,7 @@ if (import.meta.main) {
     fail(error instanceof Error ? error.message : 'bad ports')
     process.exit(2)
   }
-  const context = createContext(process.env, ports)
+  const context = createContext(process.env, ports, args.kind === 'up' && args.infisical)
   const deps = createDeps()
   process.exit(
     args.kind === 'down' ? await runDown(context, deps, args.volumes) : await runUp(context, deps)

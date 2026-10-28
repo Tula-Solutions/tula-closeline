@@ -45,6 +45,8 @@ function harness(
     /** Compose services that already have a running container. */
     running?: string[]
     secrets?: typeof secrets
+    exportSecrets?: FlowDeps['exportSecrets']
+    infisical?: boolean
     /** Another live `bun run dev` holds the start-up lock (its pid). */
     lockedBy?: number
     /** What stopping the lock holder reports (default: no stack running). */
@@ -122,6 +124,7 @@ function harness(
     siblingProblems: () => options.siblingProblems ?? [],
     buildEnv: options.buildEnv ?? buildStackEnv,
     secrets: options.secrets ?? secrets,
+    exportSecrets: options.exportSecrets,
     salt: freshSalt,
     subscribe: (onSignal) => {
       live.add(onSignal)
@@ -144,6 +147,7 @@ function harness(
     ports: DEFAULT_PORTS,
     parentEnv: options.parentEnv ?? { PATH: '/usr/bin' },
     execPath: '/bin/bun',
+    infisical: options.infisical,
   }
   return {
     calls,
@@ -883,5 +887,110 @@ describe('a second start while a stack is up (issue 86)', () => {
     await runUp(h.context, h.deps)
     expect(h.failed.join('\n')).toContain('could not take the lock')
     expect(h.failed.join('\n')).not.toContain('pid')
+  })
+})
+
+describe('runUp with Infisical', () => {
+  const exporter = (voice: Record<string, string>) => async (folder: string) =>
+    JSON.stringify(
+      Object.entries(folder === 'voice' ? voice : {}).map(([key, value]) => ({ key, value }))
+    )
+
+  test('adds the values to the child, scrubs them, and says which vendors are real', async () => {
+    const h = harness({
+      infisical: true,
+      exportSecrets: exporter({ TWILIO_AUTH_TOKEN: 'tw-secret-zzz', TWILIO_ACCOUNT_SID: '' }),
+    })
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    const voice = h.calls.find((call) => call.name === 'voice')
+    expect(voice?.env?.TWILIO_AUTH_TOKEN).toBe('tw-secret-zzz')
+    expect(voice?.secrets).toContain('tw-secret-zzz')
+    expect(h.said.join('\n')).toContain('real: TWILIO_AUTH_TOKEN (/voice)')
+    expect(h.said.join('\n')).not.toContain('tw-secret-zzz')
+  })
+
+  test('an export that fails starts the stack as today, with one notice', async () => {
+    const h = harness({ infisical: true, exportSecrets: async () => undefined })
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    expect(h.said.filter((line) => line.includes('Infisical unavailable'))).toHaveLength(1)
+    expect(h.calls.some((call) => call.name === 'fake-google')).toBe(true)
+  })
+
+  test('without the flag the exporter is never called', async () => {
+    let asked = 0
+    const h = harness({
+      exportSecrets: async () => {
+        asked++
+        return '[]'
+      },
+    })
+    await runUp(h.context, h.deps)
+    expect(asked).toBe(0)
+  })
+
+  test('a full Google set from Infisical turns the fake off', async () => {
+    const h = harness({
+      infisical: true,
+      exportSecrets: async (folder) =>
+        JSON.stringify(
+          folder === 'auth'
+            ? [
+                { key: 'GOOGLE_CLIENT_ID', value: 'gid' },
+                { key: 'GOOGLE_CLIENT_SECRET', value: 'gsecret-qqq' },
+                {
+                  key: 'GOOGLE_REDIRECT_URI',
+                  value: 'http://127.0.0.1:3002/v1/client/google/callback',
+                },
+              ]
+            : []
+        ),
+    })
+    await runUp(h.context, h.deps)
+    expect(h.calls.some((call) => call.name === 'fake-google')).toBe(false)
+    expect(h.calls.find((call) => call.name === 'auth')?.secrets).toContain('gsecret-qqq')
+  })
+
+  test('a half Google set is refused naming the missing key, not a value', async () => {
+    const h = harness({
+      infisical: true,
+      exportSecrets: async (folder) =>
+        JSON.stringify(folder === 'auth' ? [{ key: 'GOOGLE_CLIENT_ID', value: 'gid-vvv' }] : []),
+    })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.failed.join('\n')).toContain('GOOGLE_CLIENT_SECRET')
+  })
+
+  test('a bad tunnel origin from Infisical is refused without printing the value', async () => {
+    const h = harness({
+      infisical: true,
+      exportSecrets: async (folder) =>
+        JSON.stringify(
+          folder === 'hub'
+            ? [{ key: 'CLOSELINE_DEV_PUBLIC_ORIGIN', value: 'http://leaky.example' }]
+            : []
+        ),
+    })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.failed.join('\n')).not.toContain('leaky.example')
+  })
+})
+
+describe('runUp stops while Infisical is being read', () => {
+  test('a signal reaches the exporter, which is cut short', async () => {
+    let seen: AbortSignal | undefined
+    const h = harness({
+      infisical: true,
+      exportSecrets: (_folder, abort) => {
+        seen = abort?.signal
+        return new Promise((resolve) =>
+          abort?.signal.addEventListener('abort', () => resolve(undefined))
+        )
+      },
+    })
+    const run = runUp(h.context, h.deps)
+    await Bun.sleep(10)
+    h.signal()
+    expect(await run).toBe(INTERRUPTED)
+    expect(seen?.aborted).toBe(true)
   })
 })

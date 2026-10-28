@@ -1,6 +1,15 @@
 // The ordered steps of `bun run dev` and `bun run dev --down`, with every effect injected so the
 // order and the guards can be tested without Docker. scripts/dev.ts only wires the real functions.
 import {
+  applyInfisical,
+  type Exporter,
+  infisicalParent,
+  infisicalValues,
+  loadInfisical,
+  scrub,
+  vendorReport,
+} from './dev-infisical.ts'
+import {
   assertLoopbackDatabaseUrl,
   type buildStackEnv,
   type busyPorts,
@@ -39,6 +48,8 @@ export type FlowContext = {
   parentEnv: Record<string, string | undefined>
   /** The path of the running Bun, used to start the services. */
   execPath: string
+  /** Read vendor secrets from Infisical (the hub has `.infisical.json` and `--no-infisical` is off). */
+  infisical?: boolean
 }
 
 /** Every effect the flow has; the real ones are wired in scripts/dev.ts. */
@@ -72,6 +83,8 @@ export type FlowDeps = {
   siblingProblems: (root: string) => string[]
   buildEnv: typeof buildStackEnv
   secrets: Secrets
+  /** `infisical export` for one folder; undefined when it fails. */
+  exportSecrets?: Exporter
   salt: () => Buffer
   subscribe: SuperviseOptions['subscribe']
   probe: (options: { coreOrigin: string; token: string }) => Promise<WiringResult>
@@ -92,7 +105,8 @@ async function prepare(
   ctx: FlowContext,
   deps: FlowDeps,
   abort: Abort,
-  parent: Record<string, string | undefined> = ctx.parentEnv
+  parent: Record<string, string | undefined> = ctx.parentEnv,
+  scrubbed?: Parameters<typeof scrub>[1]
 ) {
   let stack: StackEnv
   try {
@@ -106,7 +120,9 @@ async function prepare(
       assertLoopbackDatabaseUrl(env.DATABASE_URL ?? '')
     }
   } catch (error) {
-    deps.fail(error instanceof Error ? error.message : 'could not build the environment')
+    deps.fail(
+      scrub(error instanceof Error ? error.message : 'could not build the environment', scrubbed)
+    )
     return undefined
   }
   const quick = { cwd: ctx.hub, env: stack.compose, timeoutMs: TIMEOUTS.dockerQuick, ...abort }
@@ -243,14 +259,40 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
   const stopped = () => abort.signal.aborted
   const failed = () => (stopped() ? INTERRUPTED : 1)
   try {
-    const ready = await prepare(ctx, deps, abort)
+    const loaded =
+      ctx.infisical && deps.exportSecrets
+        ? await loadInfisical(deps.exportSecrets, deps.say, abort)
+        : undefined
+    if (stopped()) {
+      return failed()
+    }
+    if (loaded) {
+      deps.say(vendorReport(loaded))
+    }
+    const ready = await prepare(
+      ctx,
+      deps,
+      abort,
+      loaded ? infisicalParent(ctx.parentEnv, loaded, origins(ctx.ports).portal) : ctx.parentEnv,
+      loaded
+    )
     if (!ready || stopped()) {
       return failed()
     }
-    const { stack, quick } = ready
+    const { quick } = ready
+    const stack = loaded
+      ? applyInfisical(ready.stack, loaded, deps.say, {
+          parent: infisicalParent(ctx.parentEnv, loaded, origins(ctx.ports).portal),
+          portalOrigin: origins(ctx.ports).portal,
+        })
+      : ready.stack
     // The developer's own Google client secret, when there is one, is scrubbed like the generated ones.
     const googleSecret = stack.fakeGoogle ? undefined : stack.auth.GOOGLE_CLIENT_SECRET
-    const redactions = [...secretValues(deps.secrets), ...(googleSecret ? [googleSecret] : [])]
+    const redactions = [
+      ...secretValues(deps.secrets),
+      ...(googleSecret ? [googleSecret] : []),
+      ...(loaded ? infisicalValues(loaded) : []),
+    ]
 
     const problems = deps.siblingProblems(ctx.root)
     const hasCompose = (await deps.capture(['docker', 'compose', 'version'], quick)) !== undefined

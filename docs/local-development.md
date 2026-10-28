@@ -258,6 +258,40 @@ the services' own code: nothing here stops a service reading a file itself.
 The bootstrap passwords in `compose.dev.yaml` are placeholders for the first start only; the
 script replaces the password of every login role on every start, so none stays valid.
 
+## Secrets from Infisical
+
+The owner keeps sandbox vendor credentials in Infisical (project Tula-Closeline, environment `dev`),
+one folder per repo: `/hub`, `/auth`, `/core`, `/playbook`, `/voice`, `/outbound`, `/portal`. The
+keys exist with empty values until someone fills them in.
+
+When the hub has `.infisical.json` (committed; it holds only the project id) `bun run dev` runs
+`infisical export --env=dev --path=/<folder> --format=json` for each folder and parses it in memory:
+
+- Only non-empty values are used, so an empty key keeps the fake or memory adapter.
+- A value joins its service's environment after the allowlist. It never replaces a value the script
+  generates or fixes: `DATABASE_URL`, `INTERNAL_API_TOKENS`, `AUTH_MASTER_KEY`, `ENVIRONMENT`, the
+  `*_INTERNAL_TOKEN` / `*_INTERNAL_SECRET` keys and anything else the script already sets are
+  ignored, with a line naming the key.
+- `/hub` feeds the script itself (`CLOSELINE_DEV_PUBLIC_ORIGIN`). `/auth` may hold the three
+  `GOOGLE_*` keys: all three select real Google and turn the fake provider off, a partial set is
+  refused as in "Sign in with Google". A variable set in your shell wins over Infisical.
+- Every value is scrubbed from output like the generated secrets, never written to a file and never
+  logged; messages name keys only. At start the script prints which keys are real and which are
+  faked, by name.
+- Callback URLs differ between this stack and the AWS dev stage that shares the `dev` environment, so
+  Infisical's `GOOGLE_REDIRECT_URI`, `CALENDAR_REDIRECT_URI`, `MAIL_OAUTH_REDIRECT_URI` and
+  `WEBHOOK_BASE_URL` are never used. Where the matching key is filled in, the script derives the
+  value: from `CLOSELINE_DEV_PUBLIC_ORIGIN` (shell or `/hub`) when set, else the portal's local
+  origin (`WEBHOOK_BASE_URL` has no local default and is left unset). Real Google needs the client
+  id and secret from Infisical; the redirect URI alone does not turn it on.
+- If the export fails (not logged in, no network, no access) one line says so and the stack starts
+  with its fakes, exactly as without Infisical.
+
+Log in with `infisical login`, then `infisical init` once in the hub to write `.infisical.json`; or
+set `INFISICAL_TOKEN` to a machine identity token. `bun run dev -- --no-infisical` turns it off.
+`bun run dev:smoke` prints the same real/faked report (from Infisical, so it does not know a stack
+started with `--no-infisical`).
+
 ## What the smoke test covers
 
 `bun run dev:smoke` calls the running stack over HTTP (every call with a timeout and a bounded
