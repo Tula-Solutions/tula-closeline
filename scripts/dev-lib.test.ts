@@ -54,8 +54,8 @@ function serve(handler: (request: Request) => Response | Promise<Response>) {
 
 describe('parseArgs', () => {
   test('no arguments starts the stack', () => {
-    expect(parseArgs([])).toEqual({ kind: 'up', infisical: true })
-    expect(parseArgs(['--no-infisical'])).toEqual({ kind: 'up', infisical: false })
+    expect(parseArgs([])).toEqual({ kind: 'up', infisical: true, tunnel: false })
+    expect(parseArgs(['--no-infisical'])).toEqual({ kind: 'up', infisical: false, tunnel: false })
   })
 
   test('--down stops it, --volumes also deletes the data', () => {

@@ -291,8 +291,8 @@ describe('what a failure message may contain', () => {
 
 describe('--strict', () => {
   test('parses the flag and refuses anything else', () => {
-    expect(parseSmokeArgs([])).toEqual({ strict: false })
-    expect(parseSmokeArgs(['--strict'])).toEqual({ strict: true })
+    expect(parseSmokeArgs([])).toEqual({ strict: false, tunnel: false })
+    expect(parseSmokeArgs(['--strict'])).toEqual({ strict: true, tunnel: false })
     expect(parseSmokeArgs(['--loose'])).toEqual({ error: 'unknown argument: --loose' })
   })
 

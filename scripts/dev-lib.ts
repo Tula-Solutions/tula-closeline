@@ -100,16 +100,17 @@ export function resolvePorts(env: Record<string, string | undefined>): Ports {
 
 /** What the command line asked for. */
 export type Args =
-  | { kind: 'up'; infisical: boolean }
+  | { kind: 'up'; infisical: boolean; tunnel: boolean }
   | { kind: 'down'; volumes: boolean }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 
-/** Parses `dev.ts` arguments: none (start), `--no-infisical`, `--down`, `--down --volumes`, or `--help`. */
+/** Parses `dev.ts` arguments: none (start), `--no-infisical`, `--tunnel`, `--down`, `--down --volumes`, or `--help`. */
 export function parseArgs(argv: readonly string[]): Args {
   let down = false
   let volumes = false
   let infisical = true
+  let tunnel = false
   for (const arg of argv) {
     if (arg === '--help' || arg === '-h') {
       return { kind: 'help' }
@@ -120,6 +121,8 @@ export function parseArgs(argv: readonly string[]): Args {
       volumes = true
     } else if (arg === '--no-infisical') {
       infisical = false
+    } else if (arg === '--tunnel') {
+      tunnel = true
     } else {
       return { kind: 'error', message: `unknown argument: ${arg}` }
     }
@@ -127,7 +130,10 @@ export function parseArgs(argv: readonly string[]): Args {
   if (volumes && !down) {
     return { kind: 'error', message: '--volumes only makes sense with --down' }
   }
-  return down ? { kind: 'down', volumes } : { kind: 'up', infisical }
+  if (tunnel && down) {
+    return { kind: 'error', message: '--tunnel only makes sense when starting the stack' }
+  }
+  return down ? { kind: 'down', volumes } : { kind: 'up', infisical, tunnel }
 }
 
 /** Lower-case hex of `bytes` random bytes from the operating system's secure generator. */

@@ -369,12 +369,41 @@ Deals and objects in the dev database and bucket (the Call is soft-deleted and p
 
 ## Open the stack from another device
 
-A Cloudflare quick tunnel can put the portal on a public `https` address:
+### With Tailscale Funnel (`--tunnel`)
 
-1. Start the tunnel first: `cloudflared tunnel --url http://127.0.0.1:3002`. It prints
-   `https://<random>.trycloudflare.com`.
-2. Start the stack with that origin:
-   `CLOSELINE_DEV_PUBLIC_ORIGIN=https://<random>.trycloudflare.com bun run dev`.
+`bun run dev --tunnel` puts the portal and Twilio's webhooks on a fixed public `https` address for
+as long as the stack runs. `bun run dev:smoke --strict --tunnel` signs in through that host and
+checks that `POST /webhooks/twilio/status` reaches voice.
+
+One-time owner setup:
+
+1. Install Tailscale on this machine and sign in to the tailnet.
+2. In the Tailscale admin console, turn on HTTPS certificates and approve Funnel for this machine
+   (Access controls: the `funnel` node attribute; see <https://tailscale.com/kb/1223/funnel>).
+3. Set `CLOSELINE_DEV_PUBLIC_ORIGIN=https://<machine>.<tailnet>.ts.net` in Infisical `dev`, folder
+   `/hub` (or in the shell). It must equal this machine's name in `tailscale status --json`
+   (`.Self.DNSName`); never put the real host in a repo or an issue.
+
+With `--tunnel` the script checks all of that first and stops with one line if Tailscale is stopped,
+Funnel is not enabled or the host differs. It then maps `/webhooks/twilio` to voice and `/` to the
+portal (which proxies to the services), waits until `https://<host>/` answers (the first public DNS
+lookup can take a minute), and runs `tailscale serve reset` when the stack stops, however it
+stops, so nothing stays public. After a kill -9, run `tailscale serve reset` by hand. Without
+`--tunnel` nothing changes.
+
+Register these under the host:
+
+| Vendor | URL |
+| --- | --- |
+| Google (OAuth redirect URI) | `https://<machine>.<tailnet>.ts.net/v1/client/google/callback` |
+| Microsoft or Google, for the Mailbox (redirect URI) | `https://<machine>.<tailnet>.ts.net/mailboxes/connect/callback` |
+| Microsoft or Google, for the calendar (redirect URI) | `https://<machine>.<tailnet>.ts.net/calendar/callback` |
+| Twilio (status and voice webhooks) | `https://<machine>.<tailnet>.ts.net/webhooks/twilio/...` (the paths voice documents) |
+
+### The public origin applies only with `--tunnel`
+
+`CLOSELINE_DEV_PUBLIC_ORIGIN` is ignored without `--tunnel` (set in the shell or in Infisical), so
+local sign-in and every derived callback stay on the portal's loopback address.
 
 `CLOSELINE_DEV_PUBLIC_ORIGIN` must be exactly `https://<lower-case host>` with an optional port, no
 path, query or trailing slash, and ASCII only (no punycode). An invalid value stops `bun run dev`
