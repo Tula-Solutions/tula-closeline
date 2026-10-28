@@ -273,14 +273,19 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
       ctx,
       deps,
       abort,
-      loaded ? infisicalParent(ctx.parentEnv, loaded) : ctx.parentEnv,
+      loaded ? infisicalParent(ctx.parentEnv, loaded, origins(ctx.ports).portal) : ctx.parentEnv,
       loaded
     )
     if (!ready || stopped()) {
       return failed()
     }
     const { quick } = ready
-    const stack = loaded ? applyInfisical(ready.stack, loaded, deps.say) : ready.stack
+    const stack = loaded
+      ? applyInfisical(ready.stack, loaded, deps.say, {
+          parent: infisicalParent(ctx.parentEnv, loaded, origins(ctx.ports).portal),
+          portalOrigin: origins(ctx.ports).portal,
+        })
+      : ready.stack
     // The developer's own Google client secret, when there is one, is scrubbed like the generated ones.
     const googleSecret = stack.fakeGoogle ? undefined : stack.auth.GOOGLE_CLIENT_SECRET
     const redactions = [

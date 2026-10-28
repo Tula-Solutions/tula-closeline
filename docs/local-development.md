@@ -278,6 +278,12 @@ When the hub has `.infisical.json` (committed; it holds only the project id) `bu
 - Every value is scrubbed from output like the generated secrets, never written to a file and never
   logged; messages name keys only. At start the script prints which keys are real and which are
   faked, by name.
+- Callback URLs differ between this stack and the AWS dev stage that shares the `dev` environment, so
+  Infisical's `GOOGLE_REDIRECT_URI`, `CALENDAR_REDIRECT_URI`, `MAIL_OAUTH_REDIRECT_URI` and
+  `WEBHOOK_BASE_URL` are never used. Where the matching key is filled in, the script derives the
+  value: from `CLOSELINE_DEV_PUBLIC_ORIGIN` (shell or `/hub`) when set, else the portal's local
+  origin (`WEBHOOK_BASE_URL` has no local default and is left unset). Real Google needs the client
+  id and secret from Infisical; the redirect URI alone does not turn it on.
 - If the export fails (not logged in, no network, no access) one line says so and the stack starts
   with its fakes, exactly as without Infisical.
 

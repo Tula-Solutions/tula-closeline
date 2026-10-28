@@ -44,6 +44,9 @@ const full = fakeExporter({
   voice: { TWILIO_AUTH_TOKEN: TWILIO, TWILIO_ACCOUNT_SID: '' },
 })
 
+const PORTAL = 'http://127.0.0.1:3002'
+const local = { parent: {}, portalOrigin: PORTAL }
+
 describe('loadInfisical', () => {
   test('asks for every folder in the dev environment and ignores empty values', async () => {
     const said: string[] = []
@@ -93,7 +96,7 @@ describe('using the values', () => {
   test('adds vendor keys to their service only', async () => {
     const loaded = await must(full)
     const said: string[] = []
-    const next = applyInfisical(stack, loaded, (l) => said.push(l))
+    const next = applyInfisical(stack, loaded, (l) => said.push(l), local)
     expect(next.voice.TWILIO_AUTH_TOKEN).toBe(TWILIO)
     expect(next.voice.TWILIO_ACCOUNT_SID).toBeUndefined()
     expect(next.core.TWILIO_AUTH_TOKEN).toBeUndefined()
@@ -110,7 +113,7 @@ describe('using the values', () => {
       })
     )
     const said: string[] = []
-    const next = applyInfisical(stack, loaded, (l) => said.push(l))
+    const next = applyInfisical(stack, loaded, (l) => said.push(l), local)
     expect(next.auth.DATABASE_URL).toBe('postgres://generated')
     expect(next.auth.GOOGLE_CLIENT_ID).toBe('fake')
     expect(next.core.INTERNAL_API_TOKENS).toBe('generated')
@@ -129,7 +132,7 @@ describe('using the values', () => {
         auth: { GOOGLE_CLIENT_ID: 'gid' },
       })
     )
-    const parent = infisicalParent({ GOOGLE_CLIENT_ID: 'shell' }, loaded)
+    const parent = infisicalParent({ GOOGLE_CLIENT_ID: 'shell' }, loaded, PORTAL)
     expect(parent.GOOGLE_CLIENT_ID).toBe('shell')
     expect(parent.CLOSELINE_DEV_PUBLIC_ORIGIN).toBe('https://x.example.com')
   })
@@ -138,9 +141,48 @@ describe('using the values', () => {
     const loaded = await must(
       fakeExporter({ auth: { GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b' } })
     )
-    const parent = infisicalParent({ GOOGLE_REDIRECT_URI: 'shell' }, loaded)
+    const parent = infisicalParent({ GOOGLE_REDIRECT_URI: 'shell' }, loaded, PORTAL)
     expect(parent.GOOGLE_CLIENT_ID).toBeUndefined()
     expect(parent.GOOGLE_CLIENT_SECRET).toBeUndefined()
+  })
+
+  test('callback URLs from Infisical are replaced by derived ones, local or from the tunnel', async () => {
+    const loaded = await must(
+      fakeExporter({
+        auth: {
+          GOOGLE_CLIENT_ID: 'a',
+          GOOGLE_CLIENT_SECRET: 'b',
+          GOOGLE_REDIRECT_URI: 'https://aws.example/x',
+        },
+        core: { CALENDAR_REDIRECT_URI: 'https://aws.example/cal' },
+        outbound: { MAIL_OAUTH_REDIRECT_URI: 'https://aws.example/mail' },
+        voice: { WEBHOOK_BASE_URL: 'https://aws.example/hooks' },
+      })
+    )
+    const said: string[] = []
+    const withLocal = applyInfisical(stack, loaded, (l) => said.push(l), local)
+    expect(withLocal.core.CALENDAR_REDIRECT_URI).toBe(`${PORTAL}/calendar/callback`)
+    expect(withLocal.outbound.MAIL_OAUTH_REDIRECT_URI).toBe(`${PORTAL}/mailboxes/connect/callback`)
+    expect(withLocal.voice.WEBHOOK_BASE_URL).toBeUndefined()
+    expect(infisicalParent({}, loaded, PORTAL).GOOGLE_REDIRECT_URI).toBe(
+      `${PORTAL}/v1/client/google/callback`
+    )
+    const tunnel = 'https://t.example.com'
+    const origin = { parent: { CLOSELINE_DEV_PUBLIC_ORIGIN: tunnel }, portalOrigin: PORTAL }
+    const viaTunnel = applyInfisical(stack, loaded, (l) => said.push(l), origin)
+    expect(viaTunnel.core.CALENDAR_REDIRECT_URI).toBe(`${tunnel}/calendar/callback`)
+    expect(viaTunnel.voice.WEBHOOK_BASE_URL).toBe(tunnel)
+    expect(
+      infisicalParent({ CLOSELINE_DEV_PUBLIC_ORIGIN: tunnel }, loaded, PORTAL).GOOGLE_REDIRECT_URI
+    ).toBe(`${tunnel}/v1/client/google/callback`)
+    expect(said.join('\n')).not.toContain('aws.example')
+  })
+
+  test('an AWS redirect URI alone does not make Google real', async () => {
+    const loaded = await must(
+      fakeExporter({ auth: { GOOGLE_CLIENT_ID: '', GOOGLE_REDIRECT_URI: 'https://aws.example/x' } })
+    )
+    expect(infisicalParent({}, loaded, PORTAL).GOOGLE_REDIRECT_URI).toBeUndefined()
   })
 
   test('values are scrubbed from messages', async () => {

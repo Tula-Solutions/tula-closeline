@@ -3,7 +3,13 @@
 // message: every message here names keys only. See "Secrets from Infisical" in
 // docs/local-development.md.
 import { resolve } from 'node:path'
-import { captureCommand, redact, type StackEnv } from './dev-lib.ts'
+import {
+  captureCommand,
+  GOOGLE_CALLBACK_PATH,
+  MAIL_CALLBACK_PATH,
+  redact,
+  type StackEnv,
+} from './dev-lib.ts'
 
 const hub = resolve(import.meta.dir, '..')
 
@@ -107,7 +113,8 @@ export function scrub(text: string, loaded: Loaded | undefined): string {
  */
 export function infisicalParent(
   parent: Record<string, string | undefined>,
-  loaded: Loaded
+  loaded: Loaded,
+  portalOrigin: string
 ): Record<string, string | undefined> {
   const out = { ...parent }
   const take = (name: string, value: string | undefined) => {
@@ -115,14 +122,35 @@ export function infisicalParent(
       out[name] = value
     }
   }
-  // All three from one source: a shell that sets any of them keeps the whole set.
-  if (GOOGLE_KEYS.every((name) => out[name] === undefined || out[name] === '')) {
-    for (const name of GOOGLE_KEYS) {
-      take(name, loaded.values.auth[name])
-    }
-  }
   take('CLOSELINE_DEV_PUBLIC_ORIGIN', loaded.values.hub.CLOSELINE_DEV_PUBLIC_ORIGIN)
+  // All three from one source: a shell that sets any of them keeps the whole set. The client id
+  // and secret decide whether Google is real; the redirect URI is always derived, never Infisical's.
+  const unset = GOOGLE_KEYS.every((name) => out[name] === undefined || out[name] === '')
+  const auth = loaded.values.auth
+  if (unset && (auth.GOOGLE_CLIENT_ID || auth.GOOGLE_CLIENT_SECRET)) {
+    take('GOOGLE_CLIENT_ID', auth.GOOGLE_CLIENT_ID)
+    take('GOOGLE_CLIENT_SECRET', auth.GOOGLE_CLIENT_SECRET)
+    take('GOOGLE_REDIRECT_URI', `${callbackBase(out, portalOrigin)}${GOOGLE_CALLBACK_PATH}`)
+  }
   return out
+}
+
+/** The tunnel origin when `CLOSELINE_DEV_PUBLIC_ORIGIN` is set, else the portal's local origin. */
+function callbackBase(env: Record<string, string | undefined>, portalOrigin: string): string {
+  const origin = env.CLOSELINE_DEV_PUBLIC_ORIGIN
+  return origin === undefined || origin === '' ? portalOrigin : origin
+}
+
+/**
+ * Callback URLs differ between this stack and the AWS dev stage that shares the same Infisical
+ * environment, so Infisical's values are never used: the script derives them from the tunnel
+ * origin (or the portal's local origin) for the keys that Infisical fills in.
+ */
+const DERIVED: Record<string, (base: string, tunnel: boolean) => string | undefined> = {
+  CALENDAR_REDIRECT_URI: (base) => `${base}/calendar/callback`,
+  MAIL_OAUTH_REDIRECT_URI: (base) => `${base}${MAIL_CALLBACK_PATH}`,
+  WEBHOOK_BASE_URL: (base, tunnel) => (tunnel ? base : undefined),
+  GOOGLE_REDIRECT_URI: () => undefined,
 }
 
 /**
@@ -133,16 +161,24 @@ export function infisicalParent(
 export function applyInfisical(
   stack: StackEnv,
   loaded: Loaded,
-  say: (line: string) => void
+  say: (line: string) => void,
+  where: { parent: Record<string, string | undefined>; portalOrigin: string }
 ): StackEnv {
   const next = { ...stack }
+  const base = callbackBase(where.parent, where.portalOrigin)
+  const tunnel = base !== where.portalOrigin
   for (const folder of FOLDERS) {
     if (folder === 'hub') {
       continue
     }
     const env = { ...stack[folder] }
     for (const [key, value] of Object.entries(loaded.values[folder])) {
-      if (GENERATED.test(key) || (env[key] !== undefined && env[key] !== value)) {
+      if (key in DERIVED) {
+        const derived = DERIVED[key]?.(base, tunnel)
+        if (derived !== undefined) {
+          env[key] = derived
+        }
+      } else if (GENERATED.test(key) || (env[key] !== undefined && env[key] !== value)) {
         say(`Infisical /${folder}: ${key} is set by this script and is ignored`)
       } else {
         env[key] = value
