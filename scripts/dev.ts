@@ -27,10 +27,11 @@ import {
 
 const hub = resolve(import.meta.dir, '..')
 
-const USAGE = `usage: bun run dev [--no-infisical] [--down [--volumes]]
+const USAGE = `usage: bun run dev [--no-infisical] [--tunnel] [--down [--volumes]]
 
   (no flags)         start the stack and the four services; Ctrl-C stops the services
   --no-infisical     do not read vendor secrets from Infisical (also skipped without .infisical.json)
+  --tunnel           expose the portal and /webhooks/twilio at CLOSELINE_DEV_PUBLIC_ORIGIN through Tailscale Funnel
   --down             stop the running stack (the bun run dev process and its services), then the compose containers
   --down --volumes   also delete the dev stack's volumes (database and storage data)
 
@@ -47,6 +48,25 @@ function say(line: string): void {
 
 function fail(line: string): void {
   process.stderr.write(`[dev]      error: ${line}\n`)
+}
+
+/** Runs the real `tailscale` CLI with a timeout; stdout and stderr come back together. */
+async function runTailscale(args: string[]): Promise<{ code: number; out: string }> {
+  try {
+    const proc = Bun.spawn(['tailscale', ...args], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      signal: AbortSignal.timeout(20_000),
+    })
+    const [out, err, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    return { code, out: out + err }
+  } catch {
+    return { code: -1, out: '' }
+  }
 }
 
 /** The real effects of the flow, with fresh secrets. Exported so a test can check the wiring. */
@@ -80,6 +100,7 @@ export function createDeps(): FlowDeps {
     },
     probe: probeInternalWiring,
     waitReady: (url, isAlive) => waitForReady(url, { timeoutMs: 90_000, isAlive }),
+    tailscale: runTailscale,
     say,
     fail,
   }
@@ -89,7 +110,8 @@ export function createDeps(): FlowDeps {
 export function createContext(
   env: Record<string, string | undefined>,
   ports: Ports,
-  infisical = false
+  infisical = false,
+  tunnel = false
 ): FlowContext {
   return {
     hub,
@@ -99,6 +121,7 @@ export function createContext(
     parentEnv: env,
     execPath: process.execPath,
     infisical: infisical && existsSync(join(hub, '.infisical.json')),
+    tunnel,
   }
 }
 
@@ -120,7 +143,12 @@ if (import.meta.main) {
     fail(error instanceof Error ? error.message : 'bad ports')
     process.exit(2)
   }
-  const context = createContext(process.env, ports, args.kind === 'up' && args.infisical)
+  const context = createContext(
+    process.env,
+    ports,
+    args.kind === 'up' && args.infisical,
+    args.kind === 'up' && args.tunnel
+  )
   const deps = createDeps()
   process.exit(
     args.kind === 'down' ? await runDown(context, deps, args.volumes) : await runUp(context, deps)

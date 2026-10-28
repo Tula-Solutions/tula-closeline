@@ -289,10 +289,33 @@ describe('what a failure message may contain', () => {
   })
 })
 
+describe('through a tunnel', () => {
+  test('auth readiness and signing keys go to auth directly, the client routes to the public origin', async () => {
+    const stack = fakeStack()
+    const seen: string[] = []
+    const wrapped = (async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push(String(input))
+      return fetch(String(input).replace('//localhost:', '//127.0.0.1:'), init)
+    }) as typeof fetch
+    const direct = stack.targets.auth
+    const results = await runSmoke(
+      { ...stack.targets, auth: direct.replace('127.0.0.1', 'localhost'), authDirect: direct },
+      { ...fast, fetchImpl: wrapped }
+    )
+    stack.stop()
+    expect(by(results, 'auth publishes its signing keys')?.status).toBe('pass')
+    expect(seen).toContain(`${direct}/.well-known/jwks.json`)
+    expect(seen).toContain(`${direct}/readyz`)
+    expect(seen.some((url) => url.includes('//localhost:') && url.includes('/v1/client/'))).toBe(
+      true
+    )
+  })
+})
+
 describe('--strict', () => {
   test('parses the flag and refuses anything else', () => {
-    expect(parseSmokeArgs([])).toEqual({ strict: false })
-    expect(parseSmokeArgs(['--strict'])).toEqual({ strict: true })
+    expect(parseSmokeArgs([])).toEqual({ strict: false, tunnel: false })
+    expect(parseSmokeArgs(['--strict'])).toEqual({ strict: true, tunnel: false })
     expect(parseSmokeArgs(['--loose'])).toEqual({ error: 'unknown argument: --loose' })
   })
 

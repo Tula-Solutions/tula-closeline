@@ -24,6 +24,7 @@ import {
   migrateCommand,
   origins,
   type Ports,
+  resolvePublicOrigin,
   rotationSql,
   type runCommand,
   type Secrets,
@@ -37,6 +38,7 @@ import {
   unrotatedLoginRoles,
   type WiringResult,
 } from './dev-lib.ts'
+import { startTunnel, type Tailscale, type Tunnel } from './dev-tunnel.ts'
 
 /** Where and with what the flow runs. */
 export type FlowContext = {
@@ -50,6 +52,8 @@ export type FlowContext = {
   execPath: string
   /** Read vendor secrets from Infisical (the hub has `.infisical.json` and `--no-infisical` is off). */
   infisical?: boolean
+  /** Put the portal and voice's Twilio webhooks on CLOSELINE_DEV_PUBLIC_ORIGIN through Tailscale Funnel. */
+  tunnel?: boolean
 }
 
 /** Every effect the flow has; the real ones are wired in scripts/dev.ts. */
@@ -89,6 +93,8 @@ export type FlowDeps = {
   subscribe: SuperviseOptions['subscribe']
   probe: (options: { coreOrigin: string; token: string }) => Promise<WiringResult>
   waitReady: SuperviseOptions['waitReady']
+  /** Runs `tailscale`; needed only with `--tunnel`. */
+  tailscale?: Tailscale
   say: (line: string) => void
   fail: (line: string) => void
 }
@@ -258,6 +264,8 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
   const { abort } = interrupt
   const stopped = () => abort.signal.aborted
   const failed = () => (stopped() ? INTERRUPTED : 1)
+  let tunnel: Tunnel | undefined
+  let signalled = false
   try {
     const loaded =
       ctx.infisical && deps.exportSecrets
@@ -269,20 +277,41 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
     if (loaded) {
       deps.say(vendorReport(loaded))
     }
-    const ready = await prepare(
-      ctx,
-      deps,
-      abort,
-      loaded ? infisicalParent(ctx.parentEnv, loaded, origins(ctx.ports).portal) : ctx.parentEnv,
-      loaded
-    )
+    // The public origin applies only with --tunnel; otherwise every derived URL stays on loopback.
+    const shell = ctx.tunnel
+      ? ctx.parentEnv
+      : { ...ctx.parentEnv, CLOSELINE_DEV_PUBLIC_ORIGIN: undefined }
+    if (loaded && !ctx.tunnel) {
+      delete loaded.values.hub.CLOSELINE_DEV_PUBLIC_ORIGIN
+    }
+    const parent = loaded ? infisicalParent(shell, loaded, origins(ctx.ports).portal) : shell
+    const ready = await prepare(ctx, deps, abort, parent, loaded)
     if (!ready || stopped()) {
       return failed()
     }
     const { quick } = ready
+    const publicOrigin = resolvePublicOrigin(parent)?.origin
+    if (ctx.tunnel) {
+      if (!publicOrigin || !deps.tailscale) {
+        deps.fail(
+          '--tunnel needs CLOSELINE_DEV_PUBLIC_ORIGIN (https://<machine>.<tailnet>.ts.net) in the shell or in Infisical dev /hub'
+        )
+        return 1
+      }
+      const started = await startTunnel(deps.tailscale, publicOrigin, ctx.ports)
+      if (!started.ok) {
+        deps.fail(started.message)
+        return 1
+      }
+      tunnel = started.tunnel
+      deps.say(`tunnel: ${publicOrigin} maps / to the portal and /webhooks/twilio to voice`)
+      if (stopped()) {
+        return failed()
+      }
+    }
     const stack = loaded
       ? applyInfisical(ready.stack, loaded, deps.say, {
-          parent: infisicalParent(ctx.parentEnv, loaded, origins(ctx.ports).portal),
+          parent,
           portalOrigin: origins(ctx.ports).portal,
         })
       : ready.stack
@@ -473,21 +502,41 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
 
     const where = origins(ports)
     return await deps.supervise({
-      services: serviceDefinitions(ctx.execPath, ports, stack.fakeGoogle !== undefined).map(
-        (definition) => ({
-          name: definition.name,
-          readyUrl: definition.readyUrl,
-          spawn: () =>
-            deps.spawn(definition.name, definition.cmd, {
-              cwd: definition.sibling ? siblingDir(ctx.root, definition.sibling) : ctx.hub,
-              env: stack[definition.env] ?? {},
-              secrets: redactions,
-            }),
+      services: serviceDefinitions(
+        ctx.execPath,
+        ports,
+        stack.fakeGoogle !== undefined,
+        ctx.tunnel
+      ).map((definition) => ({
+        name: definition.name,
+        readyUrl: definition.readyUrl,
+        spawn: () =>
+          deps.spawn(definition.name, definition.cmd, {
+            cwd: definition.sibling ? siblingDir(ctx.root, definition.sibling) : ctx.hub,
+            env: stack[definition.env] ?? {},
+            secrets: redactions,
+          }),
+      })),
+      probe: async () => {
+        const wiring = await deps.probe({
+          coreOrigin: where.core,
+          token: deps.secrets.internalToken,
         })
-      ),
-      probe: () => deps.probe({ coreOrigin: where.core, token: deps.secrets.internalToken }),
+        if (!wiring.ok || !tunnel || !publicOrigin) {
+          return wiring
+        }
+        // The first public DNS lookup can take a minute.
+        const failure = await deps.waitReady(`${publicOrigin}/`, () => !signalled)
+        return failure === undefined
+          ? wiring
+          : { ok: false, reason: `the tunnel ${publicOrigin} ${failure}` }
+      },
       waitReady: deps.waitReady,
-      subscribe: (onSignal) => interrupt.handOver(onSignal),
+      subscribe: (onSignal) =>
+        interrupt.handOver((signal) => {
+          signalled = true
+          onSignal(signal)
+        }),
       log: deps.say,
       error: deps.fail,
       banner: () => {
@@ -512,10 +561,14 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
         deps.say(
           `Postgres 127.0.0.1:${ports.postgres}, queue :${ports.queue}, object storage :${ports.storage}`
         )
+        if (tunnel && publicOrigin) {
+          deps.say(`public  ${publicOrigin}  (Funnel, removed when the stack stops)`)
+        }
         deps.say('running; Ctrl-C stops the services')
       },
     })
   } finally {
+    await tunnel?.stop()
     interrupt.off()
   }
 }

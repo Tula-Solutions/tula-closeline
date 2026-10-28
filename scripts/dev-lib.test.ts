@@ -54,8 +54,8 @@ function serve(handler: (request: Request) => Response | Promise<Response>) {
 
 describe('parseArgs', () => {
   test('no arguments starts the stack', () => {
-    expect(parseArgs([])).toEqual({ kind: 'up', infisical: true })
-    expect(parseArgs(['--no-infisical'])).toEqual({ kind: 'up', infisical: false })
+    expect(parseArgs([])).toEqual({ kind: 'up', infisical: true, tunnel: false })
+    expect(parseArgs(['--no-infisical'])).toEqual({ kind: 'up', infisical: false, tunnel: false })
   })
 
   test('--down stops it, --volumes also deletes the data', () => {
@@ -288,7 +288,8 @@ describe('buildStackEnv', () => {
       'http://127.0.0.1:3002,https://quiet-fox-1.trycloudflare.com'
     )
     expect(env.portal.PORTAL_DEV_ALLOWED_HOSTS).toBe('quiet-fox-1.trycloudflare.com')
-    expect(env.core.PORTAL_BASE_URL).toBe('http://127.0.0.1:3002')
+    // Links in emails (an Invitation) must open from anywhere, so they use the public origin.
+    expect(env.core.PORTAL_BASE_URL).toBe('https://quiet-fox-1.trycloudflare.com')
   })
 
   test('a public origin with a port keeps the port for auth and drops it for the host', () => {
@@ -713,6 +714,21 @@ describe('serviceDefinitions', () => {
     expect(playbook?.cmd).toEqual(['/bin/bun', '--no-env-file', 'src/server.ts'])
     expect(playbook?.env).toBe('playbook')
     expect(playbook?.readyUrl).toBe('http://127.0.0.1:3003/readyz')
+  })
+
+  test('the portal runs the dev server unless a built portal is asked for', () => {
+    const dev = definitions.find((definition) => definition.name === 'portal')
+    expect(dev?.cmd.join(' ')).not.toContain('preview')
+    const built = serviceDefinitions('/bin/bun', DEFAULT_PORTS, false, true).find(
+      (definition) => definition.name === 'portal'
+    )
+    const script = built?.cmd.at(-1) ?? ''
+    expect(built?.cmd.slice(0, 2)).toEqual(['/bin/sh', '-c'])
+    expect(script).toContain("'/bin/bun' --no-env-file --bun node_modules/vite/bin/vite.js build")
+    expect(script).toContain('&& exec ')
+    expect(script).toContain('preview --outDir node_modules/.closeline-dev-dist')
+    expect(script).toContain('--port 3002 --strictPort')
+    expect(built?.readyUrl).toBe('http://127.0.0.1:3002/')
   })
 
   test('voice runs from its clone like the playbook, ready when /readyz answers', () => {

@@ -9,10 +9,17 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { infisicalExporter, loadInfisical, vendorReport } from './dev-infisical.ts'
-import { origins, randomHex, requestWithRetry, resolvePorts } from './dev-lib.ts'
+import {
+  origins,
+  randomHex,
+  requestWithRetry,
+  resolvePorts,
+  resolvePublicOrigin,
+} from './dev-lib.ts'
 import { runBookingSteps } from './dev-smoke-booking.ts'
 import { runGoogleSteps } from './dev-smoke-google.ts'
 import { runMailboxSteps } from './dev-smoke-mailbox.ts'
+import { twilioWebhookStep } from './dev-tunnel.ts'
 
 /** How a step ended. */
 export type StepStatus = 'pass' | 'fail' | 'skip'
@@ -29,6 +36,8 @@ export type SmokeTargets = {
   /** Outbound; without it the Mailbox steps are skipped. */
   outbound?: string
   portal: string
+  /** Auth itself, for what the portal does not proxy (readiness, signing keys); defaults to `auth`. */
+  authDirect?: string
   mail: string
   /** The fake Google provider; without it the Google steps cannot tell the fake from real Google. */
   fakeGoogle?: string
@@ -347,7 +356,7 @@ export async function runSmoke(
   }
 
   await step('auth is ready', async () => {
-    const response = await request(`${targets.auth}/readyz`)
+    const response = await request(`${targets.authDirect ?? targets.auth}/readyz`)
     return response.status === 200 ? pass() : fail(`GET /readyz answered ${response.status}`)
   })
 
@@ -440,7 +449,7 @@ export async function runSmoke(
   })
 
   await step('auth publishes its signing keys', async () => {
-    const found = await call('GET', `${targets.auth}/.well-known/jwks.json`)
+    const found = await call('GET', `${targets.authDirect ?? targets.auth}/.well-known/jwks.json`)
     const keys = pick(found.json, 'keys')
     if (found.status !== 200 || !Array.isArray(keys) || keys.length === 0) {
       return fail(`GET /.well-known/jwks.json answered ${found.status} with no keys`)
@@ -2004,17 +2013,22 @@ export function formatResult(result: StepResult): string {
   return `${label}  ${result.name}${result.detail ? `: ${result.detail}` : ''}`
 }
 
-/** The smoke command line: `--strict` makes a skipped step an error. */
-export function parseSmokeArgs(argv: readonly string[]): { strict: boolean } | { error: string } {
+/** The smoke command line: `--strict` makes a skipped step an error, `--tunnel` goes through the public host. */
+export function parseSmokeArgs(
+  argv: readonly string[]
+): { strict: boolean; tunnel: boolean } | { error: string } {
   let strict = false
+  let tunnel = false
   for (const arg of argv) {
     if (arg === '--strict') {
       strict = true
+    } else if (arg === '--tunnel') {
+      tunnel = true
     } else {
       return { error: `unknown argument: ${arg}` }
     }
   }
-  return { strict }
+  return { strict, tunnel }
 }
 
 /**
@@ -2031,18 +2045,38 @@ export function exitCodeFor(results: readonly StepResult[], strict = false): num
 if (import.meta.main) {
   const args = parseSmokeArgs(process.argv.slice(2))
   if ('error' in args) {
-    process.stderr.write(`${args.error}\nusage: bun run dev:smoke [--strict]\n`)
+    process.stderr.write(`${args.error}\nusage: bun run dev:smoke [--strict] [--tunnel]\n`)
     process.exit(2)
   }
   const targets = origins(resolvePorts(process.env))
+  let publicOrigin = resolvePublicOrigin(process.env)?.origin
   // What Infisical holds, by key name only: which vendors are real and which stay faked.
   if (existsSync(join(import.meta.dir, '..', '.infisical.json'))) {
     const loaded = await loadInfisical(infisicalExporter, (line) =>
       process.stdout.write(`${line}\n`)
     )
     process.stdout.write(`${vendorReport(loaded)}\n`)
+    if (loaded && args.tunnel && !publicOrigin) {
+      publicOrigin = resolvePublicOrigin({
+        CLOSELINE_DEV_PUBLIC_ORIGIN: loaded.values.hub.CLOSELINE_DEV_PUBLIC_ORIGIN,
+      })?.origin
+    }
   }
-  const results = await runSmoke(targets)
+  if (args.tunnel && !publicOrigin) {
+    process.stderr.write(
+      '--tunnel needs CLOSELINE_DEV_PUBLIC_ORIGIN in the shell or in Infisical dev /hub\n'
+    )
+    process.exit(2)
+  }
+  // Through the tunnel the browser path is the portal origin: sign-up and sign-in go through its proxy.
+  const through =
+    args.tunnel && publicOrigin
+      ? { portal: publicOrigin, auth: publicOrigin, authDirect: targets.auth }
+      : {}
+  const results = await runSmoke({ ...targets, ...through })
+  if (args.tunnel && publicOrigin) {
+    results.push(await twilioWebhookStep(publicOrigin))
+  }
   for (const result of results) {
     process.stdout.write(`${formatResult(result)}\n`)
   }

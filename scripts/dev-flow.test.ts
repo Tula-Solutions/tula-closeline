@@ -47,6 +47,9 @@ function harness(
     secrets?: typeof secrets
     exportSecrets?: FlowDeps['exportSecrets']
     infisical?: boolean
+    /** `tailscale` calls are recorded here; the answer to `status --json`. */
+    tailscale?: { calls: string[][]; status: string }
+    tunnel?: boolean
     /** Another live `bun run dev` holds the start-up lock (its pid). */
     lockedBy?: number
     /** What stopping the lock holder reports (default: no stack running). */
@@ -137,6 +140,12 @@ function harness(
       waited.push(url)
       return options.mailFailure
     },
+    tailscale: options.tailscale
+      ? async (args) => {
+          options.tailscale?.calls.push(args)
+          return { code: 0, out: args[0] === 'status' ? (options.tailscale?.status ?? '') : '' }
+        }
+      : undefined,
     say: (line) => said.push(line),
     fail: (line) => failed.push(line),
   }
@@ -148,6 +157,7 @@ function harness(
     parentEnv: options.parentEnv ?? { PATH: '/usr/bin' },
     execPath: '/bin/bun',
     infisical: options.infisical,
+    tunnel: options.tunnel,
   }
   return {
     calls,
@@ -963,6 +973,7 @@ describe('runUp with Infisical', () => {
   test('a bad tunnel origin from Infisical is refused without printing the value', async () => {
     const h = harness({
       infisical: true,
+      tunnel: true,
       exportSecrets: async (folder) =>
         JSON.stringify(
           folder === 'hub'
@@ -992,5 +1003,131 @@ describe('runUp stops while Infisical is being read', () => {
     h.signal()
     expect(await run).toBe(INTERRUPTED)
     expect(seen?.aborted).toBe(true)
+  })
+})
+
+describe('runUp --tunnel', () => {
+  const ORIGIN = 'https://box.example.ts.net'
+  const status = JSON.stringify({
+    BackendState: 'Running',
+    Self: { DNSName: 'box.example.ts.net.', CapMap: { funnel: null } },
+  })
+  const tunnelHarness = (over: Parameters<typeof harness>[0] = {}) => {
+    const tailscale = { calls: [] as string[][], status }
+    const h = harness({
+      tunnel: true,
+      tailscale,
+      parentEnv: { PATH: '/usr/bin', CLOSELINE_DEV_PUBLIC_ORIGIN: ORIGIN },
+      ...over,
+    })
+    return { h, tailscale }
+  }
+  const resets = (calls: string[][]) => calls.filter((c) => c[0] === 'serve' && c[1] === 'reset')
+
+  test('maps the host, waits for the public origin, and resets when the stack stops', async () => {
+    const { h, tailscale } = tunnelHarness()
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    expect(tailscale.calls.filter((c) => c[0] === 'funnel')).toHaveLength(2)
+    expect(resets(tailscale.calls)).toHaveLength(2)
+    expect(tailscale.calls.at(-1)).toEqual(['serve', 'reset'])
+    expect(h.said.some((line) => line.includes(`public  ${ORIGIN}`))).toBe(true)
+  })
+
+  test('serves the portal as a production build, which loads fast over the relay', async () => {
+    const { h } = tunnelHarness()
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    const portal = h.calls.find((call) => call.kind === 'spawn' && call.name === 'portal')
+    expect(portal?.cmd?.join(' ')).toContain(' build ')
+    expect(portal?.cmd?.join(' ')).toContain(' preview ')
+  })
+
+  test('resets when the supervisor fails', async () => {
+    const { h, tailscale } = tunnelHarness({ superviseCode: 1 })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(tailscale.calls.at(-1)).toEqual(['serve', 'reset'])
+  })
+
+  test('resets when the supervisor throws', async () => {
+    const { h, tailscale } = tunnelHarness()
+    h.deps.supervise = async () => {
+      throw new Error('boom')
+    }
+    await expect(runUp(h.context, h.deps)).rejects.toThrow('boom')
+    expect(tailscale.calls.at(-1)).toEqual(['serve', 'reset'])
+  })
+
+  test('a public origin that is not this machine fails with one line and starts nothing', async () => {
+    const { h, tailscale } = tunnelHarness({
+      parentEnv: { PATH: '/usr/bin', CLOSELINE_DEV_PUBLIC_ORIGIN: 'https://x.example.ts.net' },
+    })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.failed).toHaveLength(1)
+    expect(h.supervised()).toBe(false)
+    expect(tailscale.calls.filter((c) => c[0] === 'funnel')).toHaveLength(0)
+  })
+
+  test('no public origin fails with one line', async () => {
+    const { h } = tunnelHarness({ parentEnv: { PATH: '/usr/bin' } })
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(h.failed[0]).toContain('CLOSELINE_DEV_PUBLIC_ORIGIN')
+  })
+
+  test('an origin that never answers fails the start and still resets', async () => {
+    const { h, tailscale } = tunnelHarness({ mailFailure: 'did not answer' })
+    h.deps.supervise = async (o) => {
+      const wiring = await o.probe()
+      return wiring.ok ? 0 : 1
+    }
+    expect(await runUp(h.context, h.deps)).toBe(1)
+    expect(tailscale.calls.at(-1)).toEqual(['serve', 'reset'])
+  })
+
+  test('without --tunnel Tailscale is never called', async () => {
+    const tailscale = { calls: [] as string[][], status }
+    const h = harness({
+      tailscale,
+      parentEnv: { PATH: '/usr/bin', CLOSELINE_DEV_PUBLIC_ORIGIN: ORIGIN },
+    })
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    expect(tailscale.calls).toEqual([])
+  })
+})
+
+describe('public origin without --tunnel', () => {
+  test('is ignored: callbacks and sessions stay on loopback', async () => {
+    const h = harness({
+      parentEnv: {
+        PATH: '/usr/bin',
+        CLOSELINE_DEV_PUBLIC_ORIGIN: 'https://box.example.ts.net',
+        GOOGLE_CLIENT_ID: 'id',
+        GOOGLE_CLIENT_SECRET: 'secret-value-xyz',
+        GOOGLE_REDIRECT_URI: 'http://127.0.0.1:3002/v1/client/google/callback',
+      },
+    })
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    const auth = h.calls.find((call) => call.name === 'auth')
+    expect(auth?.env?.SESSION_ALLOWED_ORIGINS).toBe('http://127.0.0.1:3002')
+    expect(JSON.stringify(h.calls.map((call) => call.env))).not.toContain('ts.net')
+  })
+
+  test('also when the origin comes from Infisical /hub', async () => {
+    const h = harness({
+      infisical: true,
+      exportSecrets: async (folder) =>
+        JSON.stringify(
+          folder === 'hub'
+            ? [{ key: 'CLOSELINE_DEV_PUBLIC_ORIGIN', value: 'https://box.example.ts.net' }]
+            : folder === 'auth'
+              ? [
+                  { key: 'GOOGLE_CLIENT_ID', value: 'id' },
+                  { key: 'GOOGLE_CLIENT_SECRET', value: 'secret-value-xyz' },
+                ]
+              : []
+        ),
+    })
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    const auth = h.calls.find((call) => call.name === 'auth')
+    expect(auth?.env?.GOOGLE_REDIRECT_URI).toBe('http://127.0.0.1:3002/v1/client/google/callback')
+    expect(JSON.stringify(h.calls.map((call) => call.env))).not.toContain('ts.net')
   })
 })

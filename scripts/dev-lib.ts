@@ -100,16 +100,17 @@ export function resolvePorts(env: Record<string, string | undefined>): Ports {
 
 /** What the command line asked for. */
 export type Args =
-  | { kind: 'up'; infisical: boolean }
+  | { kind: 'up'; infisical: boolean; tunnel: boolean }
   | { kind: 'down'; volumes: boolean }
   | { kind: 'help' }
   | { kind: 'error'; message: string }
 
-/** Parses `dev.ts` arguments: none (start), `--no-infisical`, `--down`, `--down --volumes`, or `--help`. */
+/** Parses `dev.ts` arguments: none (start), `--no-infisical`, `--tunnel`, `--down`, `--down --volumes`, or `--help`. */
 export function parseArgs(argv: readonly string[]): Args {
   let down = false
   let volumes = false
   let infisical = true
+  let tunnel = false
   for (const arg of argv) {
     if (arg === '--help' || arg === '-h') {
       return { kind: 'help' }
@@ -120,6 +121,8 @@ export function parseArgs(argv: readonly string[]): Args {
       volumes = true
     } else if (arg === '--no-infisical') {
       infisical = false
+    } else if (arg === '--tunnel') {
+      tunnel = true
     } else {
       return { kind: 'error', message: `unknown argument: ${arg}` }
     }
@@ -127,7 +130,10 @@ export function parseArgs(argv: readonly string[]): Args {
   if (volumes && !down) {
     return { kind: 'error', message: '--volumes only makes sense with --down' }
   }
-  return down ? { kind: 'down', volumes } : { kind: 'up', infisical }
+  if (tunnel && down) {
+    return { kind: 'error', message: '--tunnel only makes sense when starting the stack' }
+  }
+  return down ? { kind: 'down', volumes } : { kind: 'up', infisical, tunnel }
 }
 
 /** Lower-case hex of `bytes` random bytes from the operating system's secure generator. */
@@ -647,7 +653,8 @@ export function buildStackEnv(options: {
       // Where core reads a Call's assessments from voice; it sends its own secret.
       VOICE_INTERNAL_URL: where.voice,
       VOICE_INTERNAL_TOKEN: secrets.coreVoiceToken,
-      PORTAL_BASE_URL: where.portal,
+      // The links core emails (an Invitation) open from anywhere when a tunnel is up.
+      PORTAL_BASE_URL: publicOrigin?.origin ?? where.portal,
       MAIL_LOCAL_URL: where.mail,
       UNSUBSCRIBE_TOKEN_KEY: secrets.unsubscribeTokenKey,
       // The queue stand-in of the compose file; it ignores the credentials, but the AWS SDK will
@@ -902,14 +909,21 @@ export type ServiceDefinition = {
 
 /**
  * The processes `dev.ts` starts. `bun` is the path of the running Bun; `fakeGoogle` adds the fake
- * Google provider first, so it is up before auth is asked to sign anyone in.
+ * Google provider first, so it is up before auth is asked to sign anyone in. `builtPortal` serves
+ * the portal as a production build (for `--tunnel`): the dev server's hundreds of module requests
+ * each pay the relay's round trip, so a page over Funnel takes minutes to load.
  */
 export function serviceDefinitions(
   bun: string,
   ports: Ports,
-  fakeGoogle = false
+  fakeGoogle = false,
+  builtPortal = false
 ): ServiceDefinition[] {
   const where = origins(ports)
+  const vite = `'${bun}' --no-env-file --bun node_modules/vite/bin/vite.js`
+  // node_modules is ignored in the clone, so the build leaves no stray files.
+  const out = 'node_modules/.closeline-dev-dist'
+  const listen = `--host 127.0.0.1 --port ${ports.portal} --strictPort`
   return [
     ...(fakeGoogle
       ? [
@@ -963,17 +977,23 @@ export function serviceDefinitions(
     {
       name: 'portal',
       sibling: 'portal',
-      cmd: [
-        bun,
-        '--no-env-file',
-        '--bun',
-        'node_modules/vite/bin/vite.js',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(ports.portal),
-        '--strictPort',
-      ],
+      cmd: builtPortal
+        ? [
+            '/bin/sh',
+            '-c',
+            `${vite} build --outDir ${out} --emptyOutDir && exec ${vite} preview --outDir ${out} ${listen}`,
+          ]
+        : [
+            bun,
+            '--no-env-file',
+            '--bun',
+            'node_modules/vite/bin/vite.js',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(ports.portal),
+            '--strictPort',
+          ],
       env: 'portal',
       readyUrl: `${where.portal}/`,
     },

@@ -204,7 +204,7 @@ describe('using the values', () => {
 
 describe('--no-infisical', () => {
   test('is parsed and keeps the context from reading Infisical', () => {
-    expect(parseArgs(['--no-infisical'])).toEqual({ kind: 'up', infisical: false })
+    expect(parseArgs(['--no-infisical'])).toEqual({ kind: 'up', infisical: false, tunnel: false })
     expect(createContext({}, {} as never, false).infisical).toBe(false)
   })
 })
