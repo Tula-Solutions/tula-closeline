@@ -1033,6 +1033,14 @@ describe('runUp --tunnel', () => {
     expect(h.said.some((line) => line.includes(`public  ${ORIGIN}`))).toBe(true)
   })
 
+  test('serves the portal as a production build, which loads fast over the relay', async () => {
+    const { h } = tunnelHarness()
+    expect(await runUp(h.context, h.deps)).toBe(0)
+    const portal = h.calls.find((call) => call.kind === 'spawn' && call.name === 'portal')
+    expect(portal?.cmd?.join(' ')).toContain(' build ')
+    expect(portal?.cmd?.join(' ')).toContain(' preview ')
+  })
+
   test('resets when the supervisor fails', async () => {
     const { h, tailscale } = tunnelHarness({ superviseCode: 1 })
     expect(await runUp(h.context, h.deps)).toBe(1)

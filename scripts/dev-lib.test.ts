@@ -715,6 +715,21 @@ describe('serviceDefinitions', () => {
     expect(playbook?.readyUrl).toBe('http://127.0.0.1:3003/readyz')
   })
 
+  test('the portal runs the dev server unless a built portal is asked for', () => {
+    const dev = definitions.find((definition) => definition.name === 'portal')
+    expect(dev?.cmd.join(' ')).not.toContain('preview')
+    const built = serviceDefinitions('/bin/bun', DEFAULT_PORTS, false, true).find(
+      (definition) => definition.name === 'portal'
+    )
+    const script = built?.cmd.at(-1) ?? ''
+    expect(built?.cmd.slice(0, 2)).toEqual(['/bin/sh', '-c'])
+    expect(script).toContain("'/bin/bun' --no-env-file --bun node_modules/vite/bin/vite.js build")
+    expect(script).toContain('&& exec ')
+    expect(script).toContain('preview --outDir node_modules/.closeline-dev-dist')
+    expect(script).toContain('--port 3002 --strictPort')
+    expect(built?.readyUrl).toBe('http://127.0.0.1:3002/')
+  })
+
   test('voice runs from its clone like the playbook, ready when /readyz answers', () => {
     const voice = definitions.find((definition) => definition.name === 'voice')
     expect(voice?.sibling).toBe('voice')

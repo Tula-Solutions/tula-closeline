@@ -908,14 +908,21 @@ export type ServiceDefinition = {
 
 /**
  * The processes `dev.ts` starts. `bun` is the path of the running Bun; `fakeGoogle` adds the fake
- * Google provider first, so it is up before auth is asked to sign anyone in.
+ * Google provider first, so it is up before auth is asked to sign anyone in. `builtPortal` serves
+ * the portal as a production build (for `--tunnel`): the dev server's hundreds of module requests
+ * each pay the relay's round trip, so a page over Funnel takes minutes to load.
  */
 export function serviceDefinitions(
   bun: string,
   ports: Ports,
-  fakeGoogle = false
+  fakeGoogle = false,
+  builtPortal = false
 ): ServiceDefinition[] {
   const where = origins(ports)
+  const vite = `'${bun}' --no-env-file --bun node_modules/vite/bin/vite.js`
+  // node_modules is ignored in the clone, so the build leaves no stray files.
+  const out = 'node_modules/.closeline-dev-dist'
+  const listen = `--host 127.0.0.1 --port ${ports.portal} --strictPort`
   return [
     ...(fakeGoogle
       ? [
@@ -969,17 +976,23 @@ export function serviceDefinitions(
     {
       name: 'portal',
       sibling: 'portal',
-      cmd: [
-        bun,
-        '--no-env-file',
-        '--bun',
-        'node_modules/vite/bin/vite.js',
-        '--host',
-        '127.0.0.1',
-        '--port',
-        String(ports.portal),
-        '--strictPort',
-      ],
+      cmd: builtPortal
+        ? [
+            '/bin/sh',
+            '-c',
+            `${vite} build --outDir ${out} --emptyOutDir && exec ${vite} preview --outDir ${out} ${listen}`,
+          ]
+        : [
+            bun,
+            '--no-env-file',
+            '--bun',
+            'node_modules/vite/bin/vite.js',
+            '--host',
+            '127.0.0.1',
+            '--port',
+            String(ports.portal),
+            '--strictPort',
+          ],
       env: 'portal',
       readyUrl: `${where.portal}/`,
     },

@@ -502,18 +502,21 @@ async function runUpLocked(ctx: FlowContext, deps: FlowDeps): Promise<number> {
 
     const where = origins(ports)
     return await deps.supervise({
-      services: serviceDefinitions(ctx.execPath, ports, stack.fakeGoogle !== undefined).map(
-        (definition) => ({
-          name: definition.name,
-          readyUrl: definition.readyUrl,
-          spawn: () =>
-            deps.spawn(definition.name, definition.cmd, {
-              cwd: definition.sibling ? siblingDir(ctx.root, definition.sibling) : ctx.hub,
-              env: stack[definition.env] ?? {},
-              secrets: redactions,
-            }),
-        })
-      ),
+      services: serviceDefinitions(
+        ctx.execPath,
+        ports,
+        stack.fakeGoogle !== undefined,
+        ctx.tunnel
+      ).map((definition) => ({
+        name: definition.name,
+        readyUrl: definition.readyUrl,
+        spawn: () =>
+          deps.spawn(definition.name, definition.cmd, {
+            cwd: definition.sibling ? siblingDir(ctx.root, definition.sibling) : ctx.hub,
+            env: stack[definition.env] ?? {},
+            secrets: redactions,
+          }),
+      })),
       probe: async () => {
         const wiring = await deps.probe({
           coreOrigin: where.core,
