@@ -892,6 +892,13 @@ export function checkSiblings(root: string, needed: readonly Sibling[] = SIBLING
   return problems
 }
 
+/** The banner's note on voice: whether calls go to real, billed Twilio. */
+export function voiceLabel(provider: string | undefined): string {
+  return provider === 'twilio'
+    ? 'real Twilio: calls and numbers cost money'
+    : 'Lines; numbers come from an in-memory stand-in, never Twilio'
+}
+
 /** What the stack runs besides the compose services, in start order. */
 export type ServiceDefinition = {
   name: 'fake-google' | 'auth' | 'core' | 'playbook' | 'voice' | 'outbound' | 'portal'

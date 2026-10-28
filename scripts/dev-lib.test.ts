@@ -43,6 +43,7 @@ import {
   spawnManaged,
   stopLockHolder,
   unrotatedLoginRoles,
+  voiceLabel,
   waitForReady,
 } from './dev-lib.ts'
 
@@ -688,6 +689,14 @@ describe('ensureRolesSql', () => {
     const listed = NOLOGIN_ROLES.map((role) => [role.name, squash(role.attributes)])
     expect(listed.sort()).toEqual(fromInit.sort())
     expect(fromInit.length).toBeGreaterThan(0)
+  })
+})
+
+describe('voiceLabel', () => {
+  test('says when voice uses real Twilio, and otherwise that it never does', () => {
+    expect(voiceLabel('twilio')).toContain('real Twilio')
+    expect(voiceLabel('memory')).toContain('never Twilio')
+    expect(voiceLabel(undefined)).toContain('never Twilio')
   })
 })
 

@@ -46,6 +46,13 @@ const full = fakeExporter({
 
 const PORTAL = 'http://127.0.0.1:3002'
 const local = { parent: {}, portalOrigin: PORTAL }
+const TWILIO_KEYS = {
+  TWILIO_ACCOUNT_SID: `AC${'1'.repeat(32)}`,
+  TWILIO_API_KEY_SID: `SK${'2'.repeat(32)}`,
+  TWILIO_API_KEY_SECRET: 'api-key-secret',
+  TWILIO_AUTH_TOKEN: TWILIO,
+  TWILIO_TWIML_APP_SID: `AP${'3'.repeat(32)}`,
+}
 
 describe('loadInfisical', () => {
   test('asks for every folder in the dev environment and ignores empty values', async () => {
@@ -104,7 +111,7 @@ describe('using the values', () => {
 
   test('Twilio in /voice with the tunnel switches voice to Twilio and its webhooks to the tunnel', async () => {
     const loaded = await must(
-      fakeExporter({ voice: { TELEPHONY_PROVIDER: 'twilio', TWILIO_AUTH_TOKEN: TWILIO } })
+      fakeExporter({ voice: { TELEPHONY_PROVIDER: 'twilio', ...TWILIO_KEYS } })
     )
     const memory = { ...stack, voice: { TELEPHONY_PROVIDER: 'memory' } }
     const tunnel = {
@@ -118,7 +125,7 @@ describe('using the values', () => {
 
   test('Twilio in /voice without the tunnel keeps the stand-in and says why', async () => {
     const loaded = await must(
-      fakeExporter({ voice: { TELEPHONY_PROVIDER: 'twilio', TWILIO_AUTH_TOKEN: TWILIO } })
+      fakeExporter({ voice: { TELEPHONY_PROVIDER: 'twilio', ...TWILIO_KEYS } })
     )
     const said: string[] = []
     const memory = { ...stack, voice: { TELEPHONY_PROVIDER: 'memory' } }
@@ -126,6 +133,35 @@ describe('using the values', () => {
     expect(next.voice.TELEPHONY_PROVIDER).toBe('memory')
     expect(next.voice.WEBHOOK_BASE_URL).toBeUndefined()
     expect(said.join('\n')).toContain('--tunnel')
+  })
+
+  test('Twilio with a missing key keeps the stand-in and names the missing keys only', async () => {
+    const loaded = await must(
+      fakeExporter({ voice: { TELEPHONY_PROVIDER: 'twilio', TWILIO_AUTH_TOKEN: TWILIO } })
+    )
+    const said: string[] = []
+    const memory = { ...stack, voice: { TELEPHONY_PROVIDER: 'memory' } }
+    const tunnel = {
+      parent: { CLOSELINE_DEV_PUBLIC_ORIGIN: 'https://box.example.ts.net' },
+      portalOrigin: PORTAL,
+    }
+    const next = applyInfisical(memory, loaded, (l) => said.push(l), tunnel)
+    expect(next.voice.TELEPHONY_PROVIDER).toBe('memory')
+    const out = said.join('\n')
+    expect(out).toContain('TWILIO_ACCOUNT_SID')
+    expect(out).toContain('TWILIO_TWIML_APP_SID')
+    expect(out).not.toContain(TWILIO)
+  })
+
+  test('memory in /voice changes nothing, and another provider is refused', async () => {
+    const memory = { ...stack, voice: { TELEPHONY_PROVIDER: 'memory' } }
+    for (const value of ['memory', 'Twilio']) {
+      const loaded = await must(fakeExporter({ voice: { TELEPHONY_PROVIDER: value } }))
+      const said: string[] = []
+      const next = applyInfisical(memory, loaded, (l) => said.push(l), local)
+      expect(next.voice.TELEPHONY_PROVIDER).toBe('memory')
+      expect(said.length).toBe(value === 'memory' ? 0 : 1)
+    }
   })
 
   test('a generated key is refused, naming the key and never the value', async () => {
