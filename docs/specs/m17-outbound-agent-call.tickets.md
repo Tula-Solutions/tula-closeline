@@ -70,7 +70,7 @@ Repo: kit
 Blocked by: T4, M12-T5
 
 ## What to build
-Implement T4's Agent-leg call and detection on the provider M12 shipped. Blocked on credentials.
+Implement T4's Agent-leg call and detection on the Twilio adapter in kit (`src/telephony/twilio.ts`), the provider that shipped. Blocked on credentials.
 
 ## Acceptance criteria
 - [ ] T4's suite passes with credentials, skipped and named without.

@@ -81,7 +81,7 @@ A person who `unknown` turns out to be a machine (a beep or a long monologue aft
 
 **Handoff and booking.** Reused from M14. If no Rep is online or none answers, the Agent offers a Booking through core (M10); the Handoff line "a person has joined, the Call is recorded and AI-assisted" plays before the bridge.
 
-**Telephony.** Add to kit's `TelephonyPort` an operation to place an Agent-leg Call from a Line to a number (no browser leg) with the media stream attached, and an answering-machine detection event. Memory adapter scripts every case (human, machine, unknown, busy, no answer). The real adapter is the one M12 shipped (ADR 0027 chose Telnyx; M12 names Twilio, the ticket states which landed).
+**Telephony.** Add to kit's `TelephonyPort` an operation to place an Agent-leg Call from a Line to a number (no browser leg) with the media stream attached, and an answering-machine detection event. Memory adapter scripts every case (human, machine, unknown, busy, no answer). The real adapter is kit's Twilio adapter (`src/telephony/twilio.ts`), which is what shipped; ADR 0027 chose Telnyx, so a Telnyx move would add a second adapter behind the same port.
 
 **Data (`db`).** `voice.agent_calls` (Organization, key, source, enrollment id and step id as opaque ids, Prospect id, number hash, Line, attempt, state, result, end reason, gate code, timestamps, Call id), `voice.lines` gains the two cap columns, `outbound.enrollment_events` gains no new table (a `call.result` event type), the Step carries `max_attempts` and `retry_after` in the Sequence JSON. All tenant tables have fail-closed RLS. Phone numbers are never logged.
 
